@@ -85,6 +85,12 @@ static struct option lopts[] = {
 	{ NULL,				0,			NULL, '\0' }
 };
 
+#define SKIPLINE(fp)				\
+	do {					\
+		while (fgetc(fp) != '\n')	\
+			;			\
+	} while (0)
+
 int
 main(int argc, char *argv[])
 {
@@ -217,10 +223,11 @@ main(int argc, char *argv[])
 		if (!readhunk(lbuf_get(&lbd), &h))
 			goto badhunk;
 		j = MIN(h.h_c - lnb, h.h_a - lna);
+		if (h.h_type == HT_CHG)
+			j--;
 		for (i = 0; i < j; lna++, lnb++, i++) {
-			if (!getline(fpa, &lba))
-				goto badhunk;
-			if (!getline(fpb, &lbb))
+			if (!getline(fpa, &lba) ||
+			    !getline(fpb, &lbb))
 				goto badhunk;
 			if (strcmp(lbuf_get(&lba), lbuf_get(&lbb)) != 0)
 				goto badhunk;
@@ -235,9 +242,7 @@ main(int argc, char *argv[])
 				if (!getline(fpb, &lbb))
 					goto badhunk;
 				/* XXX: compare for consistency. */
-				/* Skip past a line. */
-				while (fgetc(fpd) != '\n')
-					;
+				SKIPLINE(fpd);
 				disp(outfp, NULL, &lbb, '>');
 				lbuf_reset(&lbb);
 			}
@@ -245,15 +250,21 @@ main(int argc, char *argv[])
 		case HT_CHG:
 			/* Print lines that were changed. */
 			j = MIN(h.h_b - h.h_a, h.h_d - h.h_c);
-			for (i = 0; i < j;
+			for (i = 0; i <= j;
 			     i++, h.h_a++, h.h_c++, lna++, lnb++) {
-				if (!getline(fpa, &lba))
-					goto badhunk;
-				if (!getline(fpb, &lbb))
+				/*
+				 * By definition (i.e., MIN() above),
+				 * these should return content.
+				 */
+				if (!getline(fpa, &lba) ||
+				    !getline(fpb, &lbb))
 					goto badhunk;
 				disp(outfp, &lba, &lbb, '|');
 				lbuf_reset(&lba);
 				lbuf_reset(&lbb);
+				/* XXX: validate. */
+				SKIPLINE(fpd);
+				SKIPLINE(fpd);
 			}
 			/* Print lines that were deleted. */
 			for (; h.h_a <= h.h_b; h.h_a++, lna++) {
@@ -261,6 +272,7 @@ main(int argc, char *argv[])
 					goto badhunk;
 				disp(outfp, &lba, NULL, '<');
 				lbuf_reset(&lba);
+				SKIPLINE(fpd);
 			}
 			/* Print lines that were added. */
 			for (; h.h_c <= h.h_d; h.h_c++, lnb++) {
@@ -268,16 +280,19 @@ main(int argc, char *argv[])
 					goto badhunk;
 				disp(outfp, NULL, &lbb, '>');
 				lbuf_reset(&lbb);
+				SKIPLINE(fpd);
 			}
+			/*
+			 * One of the lines must be a `---' separator.
+			 */
+			SKIPLINE(fpd);
 			break;
 		case HT_DEL:
 			for (; h.h_a <= h.h_b; h.h_a++, lna++) {
 				if (!getline(fpa, &lba))
 					goto badhunk;
 				/* XXX: compare for consistency. */
-				/* Skip past a line. */
-				while (fgetc(fpd) != '\n')
-					;
+				SKIPLINE(fpd);
 				disp(outfp, &lba, NULL, '<');
 				lbuf_reset(&lba);
 			}
