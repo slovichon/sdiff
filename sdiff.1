@@ -1,4 +1,6 @@
 .\" $Id$
+.\" Written by Jared Yanovich
+.\" This file belongs to the public domain.
 .Dd August 21, 2004
 .Dt SDIFF 1
 .Os
@@ -7,8 +9,7 @@
 .Nd view differences side-by-side
 .Sh SYNOPSIS
 .Nm sdiff
-.\" Op Fl aBbdEHilstW
-.Op Fl abdHilstW
+.Op Fl abdilstW
 .Op Fl I Ar pattern
 .Op Fl o Ar file
 .Op Fl w Ar width
@@ -31,8 +32,6 @@ supports the following options:
 .Bl -tag -width indent
 .It Fl a
 Force the file arguments to be interpreted as ASCII text files.
-.\" It Fl B
-.\" Do not print blank lines.
 .It Fl b
 Ignore differences of lines that differ by changes in the amount of
 whitespace.
@@ -41,11 +40,6 @@ Try to produce fewer differences if possible.
 Note that using this option may take
 .Nm
 longer to run.
-.\" It Fl E
-.\" Ignore differences of lines that differ by amounts of whitespace due to
-.\" tab expansion.
-.It Fl H
-Assume input files are large and have small, scattered differences.
 .It Fl I Ar pattern
 Ignore differences whose lines match the given
 .Ar pattern .
@@ -82,6 +76,9 @@ By default, if standard input is from a terminal,
 will try to detect the maximum number of columns available, else it use
 130.
 Setting the width to 0 will not limit the display of the lines at all.
+.It Fl Fl strip-trailing-cr
+Supress the output of trailing carriage-return characters
+.Pq Sq \er .
 .El
 .Pp
 .Nm
@@ -120,13 +117,3 @@ above.
 .Sh SEE ALSO
 .Xr diff 1 ,
 .Xr re_format 7 
-.Sh BUGS
-Because
-.Nm
-does not run at the same exact time as the
-.Xr diff 1
-process it invokes, the files may not be the same when
-.Nm
-compares them.
-This means that the output may be wrong if another process is changing
-the data in the files.
