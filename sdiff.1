@@ -7,7 +7,8 @@
 .Nd view differences side-by-side
 .Sh SYNOPSIS
 .Nm sdiff
-.Op Fl aBbdEHilstW
+.\" Op Fl aBbdEHilstW
+.Op Fl abdHilstW
 .Op Fl I Ar pattern
 .Op Fl o Ar file
 .Op Fl w Ar width
@@ -30,8 +31,8 @@ supports the following options:
 .Bl -tag -width indent
 .It Fl a
 Force the file arguments to be interpreted as ASCII text files.
-.It Fl B
-Do not print blank lines.
+.\" It Fl B
+.\" Do not print blank lines.
 .It Fl b
 Ignore differences of lines that differ by changes in the amount of
 whitespace.
@@ -40,9 +41,9 @@ Try to produce fewer differences if possible.
 Note that using this option may take
 .Nm
 longer to run.
-.It Fl E
-Ignore differences of lines that differ by amounts of whitespace due to
-tab expansion.
+.\" It Fl E
+.\" Ignore differences of lines that differ by amounts of whitespace due to
+.\" tab expansion.
 .It Fl H
 Assume input files are large and have small, scattered differences.
 .It Fl I Ar pattern
