@@ -15,6 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "lbuf.h"
 #include "pathnames.h"
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -34,12 +35,12 @@ struct hunk {
 	int h_d;	/* file b end */
 };
 
-static		char  *getline(FILE *);
 static		char **buildargv(char *, char *, char *);
 static		char **buildenvp(void);
-static		int    startdiff(char *, char *);
-static		void   disp(FILE *, const char *, const char *, char);
+static		int    getline(FILE *, struct lbuf *);
 static		int    readhunk(const char *, struct hunk *);
+static		int    startdiff(char *, char *);
+static		void   disp(FILE *, struct lbuf *, struct lbuf *, char);
 static __dead	void   usage(void);
 
 static char *diffprog = _PATH_DIFF;
@@ -89,7 +90,7 @@ main(int argc, char *argv[])
 {
 	int c, fd, status, lna, lnb, i, j;
 	FILE *fpd, *fpa, *fpb, *outfp;
-	char *lbd, *lba, *lbb;
+	struct lbuf lbd, lba, lbb;
 	struct hunk h;
 	size_t siz;
 	long l;
@@ -209,33 +210,36 @@ main(int argc, char *argv[])
 	if ((fpd = fdopen(fd, "r")) == NULL)
 		err(2, "fdopen %s", diffprog);
 	lna = lnb = 0;
-	while ((lbd = getline(fpd)) != NULL) {
-		if (!readhunk(lbd, &h))
+	lbuf_init(&lbd);
+	lbuf_init(&lba);
+	lbuf_init(&lbb);
+	while (getline(fpd, &lbd)) {
+		if (!readhunk(lbuf_get(&lbd), &h))
 			goto badhunk;
 		j = MIN(h.h_c - lnb, h.h_a - lna);
 		for (i = 0; i < j; lna++, lnb++, i++) {
-			if ((lba = getline(fpa)) == NULL)
+			if (!getline(fpa, &lba))
 				goto badhunk;
-			if ((lbb = getline(fpb)) == NULL)
+			if (!getline(fpb, &lbb))
 				goto badhunk;
-			if (strcmp(lba, lbb) != 0)
+			if (strcmp(lbuf_get(&lba), lbuf_get(&lbb)) != 0)
 				goto badhunk;
 			if (!suppresscommon)
-				disp(outfp, lba, lbb, ' ');
-			free(lba);
-			free(lbb);
+				disp(outfp, &lba, &lbb, ' ');
+			lbuf_reset(&lba);
+			lbuf_reset(&lbb);
 		}
 		switch (h.h_type) {
 		case HT_ADD:
 			for (; h.h_c <= h.h_d; h.h_c++, lnb++) {
-				if ((lbb = getline(fpb)) == NULL)
+				if (!getline(fpb, &lbb))
 					goto badhunk;
 				/* XXX: compare for consistency. */
 				/* Skip past a line. */
 				while (fgetc(fpd) != '\n')
 					;
-				disp(outfp, "", lbb, '>');
-				free(lbb);
+				disp(outfp, NULL, &lbb, '>');
+				lbuf_reset(&lbb);
 			}
 			break;
 		case HT_CHG:
@@ -243,48 +247,63 @@ main(int argc, char *argv[])
 			j = MIN(h.h_b - h.h_a, h.h_d - h.h_c);
 			for (i = 0; i < j;
 			     i++, h.h_a++, h.h_c++, lna++, lnb++) {
-				if ((lba = getline(fpa)) == NULL)
+				if (!getline(fpa, &lba))
 					goto badhunk;
-				if ((lbb = getline(fpb)) == NULL)
+				if (!getline(fpb, &lbb))
 					goto badhunk;
-				disp(outfp, lba, lbb, '|');
-				free(lba);
-				free(lbb);
+				disp(outfp, &lba, &lbb, '|');
+				lbuf_reset(&lba);
+				lbuf_reset(&lbb);
 			}
 			/* Print lines that were deleted. */
 			for (; h.h_a <= h.h_b; h.h_a++, lna++) {
-				if ((lba = getline(fpa)) == NULL)
+				if (!getline(fpa, &lba))
 					goto badhunk;
-				disp(outfp, lba, "", '<');
-				free(lba);
+				disp(outfp, &lba, NULL, '<');
+				lbuf_reset(&lba);
 			}
 			/* Print lines that were added. */
 			for (; h.h_c <= h.h_d; h.h_c++, lnb++) {
-				if ((lbb = getline(fpb)) == NULL)
+				if (!getline(fpb, &lbb))
 					goto badhunk;
-				disp(outfp, "", lbb, '>');
-				free(lbb);
+				disp(outfp, NULL, &lbb, '>');
+				lbuf_reset(&lbb);
 			}
 			break;
 		case HT_DEL:
 			for (; h.h_a <= h.h_b; h.h_a++, lna++) {
-				if ((lba = getline(fpa)) == NULL)
+				if (!getline(fpa, &lba))
 					goto badhunk;
 				/* XXX: compare for consistency. */
 				/* Skip past a line. */
 				while (fgetc(fpd) != '\n')
 					;
-				disp(outfp, lba, "", '<');
-				free(lba);
+				disp(outfp, &lba, NULL, '<');
+				lbuf_reset(&lba);
 			}
 			break;
 			/* NOTREACHED */
 		}
-		free(lbd);
+		lbuf_reset(&lbd);
+	}
+	/* Print remaining lines */
+	if (!suppresscommon) {
+		for (;;) {
+			/* XXX: These should both be NULL when one is. */
+			if (!getline(fpa, &lba) ||
+			    !getline(fpb, &lbb))
+				break;
+			disp(outfp, &lba, &lbb, ' ');
+			lbuf_reset(&lba);
+			lbuf_reset(&lbb);
+		}
 	}
 	(void)fclose(fpd);
 	(void)fclose(fpa);
 	(void)fclose(fpb);
+	lbuf_free(&lbd);
+	lbuf_free(&lba);
+	lbuf_free(&lbb);
 
 	if (outfp != stdout)
 		(void)fclose(outfp);
@@ -294,39 +313,26 @@ main(int argc, char *argv[])
 	exit(status);
 
 badhunk:
-	errx(2, "invalid diff output: %s", lbd);
+	errx(2, "invalid diff output: %s", lbuf_get(&lbd));
 }
 
 static void
-disp(FILE *fp, const char *a, const char *b, char c)
+disp(FILE *fp, struct lbuf *a, struct lbuf *b, char c)
 {
-	(void)fprintf(fp, "%-*.*s %c %-*.*s\n", width, width, a, c,
-	    width, width, b);
+	(void)fprintf(fp, "%-*.*s %c %-*.*s\n", width, width,
+	    a == NULL ? "" : lbuf_get(a), c, width, width,
+	    b == NULL ? "" : lbuf_get(b));
 }
 
-static char *
-getline(FILE *fp)
+static int
+getline(FILE *fp, struct lbuf *lb)
 {
-	char *lb, *lbdup = NULL;
-	size_t siz;
+	int c, read;
 
-	if ((lb = fgetln(fp, &siz)) == NULL) {
-		if (feof(fp))
-			return (NULL);
-		else
-			err(2, "fgetln");
-	}
-	if (lb[siz - 1] == '\n') {
-		lb[siz - 1] = '\0';
-		if ((lb = strdup(lb)) == NULL)
-			err(2, "strdup");
-	} else {
-		lbdup = malloc(siz + 1);
-		memcpy(lbdup, lb, siz);
-		lbdup[siz] = '\0';
-		lb = lbdup;
-	}
-	return (lb);
+	for (read = 0; (c = fgetc(fp)) != EOF && c != '\n'; read++)
+		lbuf_append(lb, (char)c);
+	lbuf_append(lb, '\0');
+	return (read > 0);
 }
 
 #define ST_BEG  1	/* beginning */
@@ -567,13 +573,11 @@ startdiff(char *a, char *b)
 		free(envp);
 		err(2, "execve");
 		/* NOTREACHED */
-	default:
-		(void)close(fd[1]);
-		(void)close(STDIN_FILENO);
-		free(argv);
-		free(envp);
-		break;
 	}
+	(void)close(fd[1]);
+	(void)close(STDIN_FILENO);
+	free(argv);
+	free(envp);
 	return (fd[0]);
 }
 
