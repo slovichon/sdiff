@@ -231,7 +231,9 @@ main(int argc, char *argv[])
 				goto badhunk;
 			if (strcmp(lbuf_get(&lba), lbuf_get(&lbb)) != 0)
 				goto badhunk;
-			if (!suppresscommon)
+			if (leftcol)
+				disp(outfp, &lba, NULL, '(');
+			else if (!suppresscommon)
 				disp(outfp, &lba, &lbb, ' ');
 			lbuf_reset(&lba);
 			lbuf_reset(&lbb);
@@ -302,13 +304,16 @@ main(int argc, char *argv[])
 		lbuf_reset(&lbd);
 	}
 	/* Print remaining lines */
-	if (!suppresscommon) {
+	if (leftcol || !suppresscommon) {
 		for (;;) {
 			/* XXX: These should both be NULL when one is. */
 			if (!getline(fpa, &lba) ||
 			    !getline(fpb, &lbb))
 				break;
-			disp(outfp, &lba, &lbb, ' ');
+			if (leftcol)
+				disp(outfp, &lba, NULL, '(');
+			else
+				disp(outfp, &lba, &lbb, ' ');
 			lbuf_reset(&lba);
 			lbuf_reset(&lbb);
 		}
@@ -346,6 +351,9 @@ getline(FILE *fp, struct lbuf *lb)
 
 	for (read = 0; (c = fgetc(fp)) != EOF && c != '\n'; read++)
 		lbuf_append(lb, (char)c);
+	/* XXX: extend API. */
+	if (stripcr && lb->lb_buf[lb->lb_pos - 1] == '\r')
+		lb->lb_pos--;
 	lbuf_append(lb, '\0');
 	return (read > 0);
 }
