@@ -1,8 +1,8 @@
 # $Id$
 
 PROG = sdiff
-SRCS = sdiff.c lbuf.c
+SRCS = sdiff.c bufchunk.c
 MAN = sdiff.1
-CFLAGS = -Wall -g
+CFLAGS = -Wall -g -I../lbuf
 
 .include <bsd.prog.mk>
