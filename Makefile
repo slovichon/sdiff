@@ -1,7 +1,7 @@
 # $Id$
 
 PROG = sdiff
-SRCS = sdiff.c
+SRCS = sdiff.c lbuf.c
 MAN = sdiff.1
 CFLAGS = -Wall -g
 
