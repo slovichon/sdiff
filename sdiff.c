@@ -206,21 +206,15 @@ main(int argc, char *argv[])
 		if ((outfp = fopen(outfile, "w")) == NULL)
 			err(2, "fopen %s", outfile);
 
-	/* XXX: race between now and when diff opens these files. */
-	if ((fpa = fopen(argv[0], "r")) == NULL)
-		err(2, "fopen %s", argv[0]);
-	if ((fpb = fopen(argv[1], "r")) == NULL)
-		err(2, "fopen %s", argv[1]);
-
-	fd = startdiff(argv[0], argv[1]);
+	startdiff(&fd, argv[0], argv[1], &fpa, &fpb);
 	if ((fpd = fdopen(fd, "r")) == NULL)
 		err(2, "fdopen %s", diffprog);
 	lna = lnb = 0;
-	lbuf_init(&lbd);
-	lbuf_init(&lba);
-	lbuf_init(&lbb);
+	LBUF_INIT(lbd);
+	LBUF_INIT(lba);
+	LBUF_INIT(lbb);
 	while (getline(fpd, &lbd)) {
-		if (!readhunk(lbuf_get(&lbd), &h))
+		if (!readhunk(LBUF_GET(lbd), &h))
 			goto badhunk;
 		j = MIN(h.h_c - lnb, h.h_a - lna);
 		if (h.h_type == HT_CHG)
@@ -229,14 +223,14 @@ main(int argc, char *argv[])
 			if (!getline(fpa, &lba) ||
 			    !getline(fpb, &lbb))
 				goto badhunk;
-			if (strcmp(lbuf_get(&lba), lbuf_get(&lbb)) != 0)
+			if (strcmp(LBUF_GET(lba), LBUF_GET(lbb)) != 0)
 				goto badhunk;
 			if (leftcol)
 				disp(outfp, &lba, NULL, '(');
 			else if (!suppresscommon)
 				disp(outfp, &lba, &lbb, ' ');
-			lbuf_reset(&lba);
-			lbuf_reset(&lbb);
+			LBUF_RESET(lba);
+			LBUF_RESET(lbb);
 		}
 		switch (h.h_type) {
 		case HT_ADD:
@@ -246,7 +240,7 @@ main(int argc, char *argv[])
 				/* XXX: compare for consistency. */
 				SKIPLINE(fpd);
 				disp(outfp, NULL, &lbb, '>');
-				lbuf_reset(&lbb);
+				LBUF_RESET(lbb);
 			}
 			break;
 		case HT_CHG:
@@ -262,8 +256,8 @@ main(int argc, char *argv[])
 				    !getline(fpb, &lbb))
 					goto badhunk;
 				disp(outfp, &lba, &lbb, '|');
-				lbuf_reset(&lba);
-				lbuf_reset(&lbb);
+				LBUF_RESET(lba);
+				LBUF_RESET(lbb);
 				/* XXX: validate. */
 				SKIPLINE(fpd);
 				SKIPLINE(fpd);
@@ -273,7 +267,7 @@ main(int argc, char *argv[])
 				if (!getline(fpa, &lba))
 					goto badhunk;
 				disp(outfp, &lba, NULL, '<');
-				lbuf_reset(&lba);
+				LBUF_RESET(lba);
 				SKIPLINE(fpd);
 			}
 			/* Print lines that were added. */
@@ -281,7 +275,7 @@ main(int argc, char *argv[])
 				if (!getline(fpb, &lbb))
 					goto badhunk;
 				disp(outfp, NULL, &lbb, '>');
-				lbuf_reset(&lbb);
+				LBUF_RESET(lbb);
 				SKIPLINE(fpd);
 			}
 			/*
@@ -296,12 +290,12 @@ main(int argc, char *argv[])
 				/* XXX: compare for consistency. */
 				SKIPLINE(fpd);
 				disp(outfp, &lba, NULL, '<');
-				lbuf_reset(&lba);
+				LBUF_RESET(lba);
 			}
 			break;
 			/* NOTREACHED */
 		}
-		lbuf_reset(&lbd);
+		LBUF_RESET(lbd);
 	}
 	/* Print remaining lines */
 	if (leftcol || !suppresscommon) {
@@ -314,16 +308,16 @@ main(int argc, char *argv[])
 				disp(outfp, &lba, NULL, '(');
 			else
 				disp(outfp, &lba, &lbb, ' ');
-			lbuf_reset(&lba);
-			lbuf_reset(&lbb);
+			LBUF_RESET(lba);
+			LBUF_RESET(lbb);
 		}
 	}
 	(void)fclose(fpd);
 	(void)fclose(fpa);
 	(void)fclose(fpb);
-	lbuf_free(&lbd);
-	lbuf_free(&lba);
-	lbuf_free(&lbb);
+	LBUF_FREE(lbd);
+	LBUF_FREE(lba);
+	LBUF_FREE(lbb);
 
 	if (outfp != stdout)
 		(void)fclose(outfp);
@@ -333,15 +327,15 @@ main(int argc, char *argv[])
 	exit(status);
 
 badhunk:
-	errx(2, "invalid diff output: %s", lbuf_get(&lbd));
+	errx(2, "invalid diff output: %s", LBUF_GET(lbd));
 }
 
 static void
 disp(FILE *fp, struct lbuf *a, struct lbuf *b, char c)
 {
 	(void)fprintf(fp, "%-*.*s %c %-*.*s\n", width, width,
-	    a == NULL ? "" : lbuf_get(a), c, width, width,
-	    b == NULL ? "" : lbuf_get(b));
+	    a == NULL ? "" : LBUF_GET(*a), c, width, width,
+	    b == NULL ? "" : LBUF_GET(*b));
 }
 
 static int
@@ -350,11 +344,11 @@ getline(FILE *fp, struct lbuf *lb)
 	int c, read;
 
 	for (read = 0; (c = fgetc(fp)) != EOF && c != '\n'; read++)
-		lbuf_append(lb, (char)c);
+		LBUF_APPEND(*lb, (char)c);
 	/* XXX: extend API. */
 	if (stripcr && lb->lb_buf[lb->lb_pos - 1] == '\r')
 		lb->lb_pos--;
-	lbuf_append(lb, '\0');
+	LBUF_APPEND(*lb, '\0');
 	return (read > 0);
 }
 
@@ -563,18 +557,49 @@ buildenvp(void)
 	return (envp);
 }
 
-static int
-startdiff(char *a, char *b)
+static void
+startdiff(int *fd, char *fna, char *fnb, FILE *fpa, FILE *fpb)
 {
 	char **argv, **envp, *dpn;
-	int fd[2];
+	int loop, diff; fd[2];
+
+	loop = diff = fileno();
+
+	if (strcmp(fna, "-") == 0 || strcmp(fnb, "-") == 0) {
+		switch (fork()) {
+		case -1:
+			err(2, "fork");
+			/* NOTREACHED */
+		case 0:
+			spray(FILENO(stdin), *loop, *diffin);
+			/* NOTREACHED */
+		}
+	}
+
+	if (strcmp(a, "-") == 0) {
+		if ((*fpa = fdopen(dupfd, "r")) == NULL)
+			err(2, "fdopen <stdin>");
+	} else {
+		/* XXX: race between now and when diff opens this file. */
+		if ((*fpa = fopen(fna, "r")) == NULL)
+			err(2, "fopen %s", argv[0]);
+	}
+
+	if (strcmp(fnb, "-") == 0) {
+		if ((*fpa = fdopen(dupfd, "r")) == NULL)
+			err(2, "fdopen <stdin>");
+	} else {
+		/* XXX: race between now and when diff opens this file. */
+		if ((fpb = fopen(fnb, "r")) == NULL)
+			err(2, "fopen %s", argv[1]);
+	}
 
 	if ((dpn = strrchr(diffprog, '/')) == NULL)
 		dpn = diffprog;
 	else
 		dpn++;
 
-	argv = buildargv(dpn, a, b);
+	argv = buildargv(dpn, fna, fnb);
 	envp = buildenvp();
 
 	if (pipe(fd) == -1)
@@ -602,6 +627,33 @@ startdiff(char *a, char *b)
 	free(argv);
 	free(envp);
 	return (fd[0]);
+}
+
+void
+spray(int fdin, int fdout, int fdout2)
+{
+	struct bufchunk *bc = NULL;
+	char buf[BUFSIZ], *p;
+	ssize_t nread;
+	size_t len;
+
+	while ((nread = read(fd, buf, sizeof(buf) - 1)) != 0 &&
+	    nread != -1) {
+		buf[nread] = '\0';
+		(void)write(fdout, buf, nread);
+		if ((p = strdup(buf)) == NULL)
+			err(2, "strdup");
+		bc_push(&bc, p);
+	}
+
+	if (len == -1)
+		err(2, "read");
+
+	while (bc != NULL) {
+		p = bc_pop(&bc);
+		(void)write(fdout2, p, strlen(p));
+		free(p);
+	}
 }
 
 static __dead void
