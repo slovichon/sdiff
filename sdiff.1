@@ -52,10 +52,39 @@ Ignore changes in uppercase/lowercase of characters.
 .It Fl l
 Flush output to the left column.
 .It Fl o Ar file
-Store the side-by-side output in the given
+Interactively merge the differences between the file arguments into the
+given output
 .Ar file .
-When this option is given, there is no limit on the width of the display
-of each file (see the
+.Pp
+Between each difference, the prompt
+.Ic %
+is given and accepts the following commands:
+.Pp
+.Bl -tag -width Ds -compact
+.It Ic e
+Invoke the editor with a blank line.
+.It Ic eb
+Invoke the editor with lines from both displays.
+.It Ic el
+Invoke the editor with the line from the left display.
+.It Ic er
+Invoke the editor with the line from the right display.
+.It Ic l
+Select the line from the left display.
+.It Ic q
+Quit the program.
+.It Ic r
+Select the line from the right display.
+.It Ic s
+Enable silent mode, printing only differing lines from the files.
+.It Ic v
+Enable verbose mode, printing all lines from the files.
+.El
+.Pp
+When this option is given, there is no limit on the width of the resulting
+lines that are sent to the given output
+.Ar file
+(see the
 .Fl w
 option below).
 .It Fl s
@@ -94,20 +123,29 @@ An error occurred.
 .El
 .Sh ENVIRONMENT
 .Nm
-passes along the following environmental variables to
-.Xr diff 1 .
+recognizes the following environmental variables:
 .Bl -tag -width TMPDIR
 .It Ev TMPDIR
 If this environmental variable is set,
 .Xr diff 1
-will use it to store its temporary files.
+will use it to store its temporary files there and
+.Nm
+will use it to store its temporary files used for editing when
+interactively merging differences.
+.It Ev EDITOR
+This environment variable can be set to override the usage of the
+default editor for editing when interactively merging differences.
 .El
 .Sh FILES
-.Bl -tag -width /usr/bin/diff -compact
+.Bl -tag -width /tmp/sdiff.XXXXXXXX -compact
 .It Pa /usr/bin/diff
 default
 .Xr diff 1
 program
+.It Pa /usr/bin/vi
+default editor
+.It Pa /tmp/sdiff. Ns Va XXXXXXXX
+temporary file used during editing
 .El
 .Sh STANDARDS
 The
@@ -116,4 +154,5 @@ utility supports GNU-style long arguments for each option described
 above.
 .Sh SEE ALSO
 .Xr diff 1 ,
+.Xr vi 1 ,
 .Xr re_format 7 
