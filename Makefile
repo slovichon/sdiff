@@ -1,8 +1,8 @@
 # $Id$
 
 PROG = sdiff
-SRCS = sdiff.c bufchunk.c
+SRCS = sdiff.c
 MAN = sdiff.1
-CFLAGS = -Wall -g -I../lbuf
+CFLAGS = -I${.CURDIR}/../lbuf
 
 .include <bsd.prog.mk>
