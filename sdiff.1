@@ -1,0 +1,121 @@
+.\" $Id$
+.Dd August 21, 2004
+.Dt SDIFF 1
+.Os
+.Sh NAME
+.Nm sdiff
+.Nd view differences side-by-side
+.Sh SYNOPSIS
+.Nm sdiff
+.Op Fl aBbdEHilstW
+.Op Fl I Ar pattern
+.Op Fl o Ar file
+.Op Fl w Ar width
+.Ar file1 file2
+.Sh DESCRIPTION
+The
+.Nm
+utility is used to view files side-by-side, with differences marked as
+output by
+.Xr diff 1 .
+If a hyphen
+.Pq Sq -
+is given for one of the
+.Ar file
+arguments,
+the contents of the other will be compared against standard input.
+.Pp
+.Nm
+supports the following options:
+.Bl -tag -width indent
+.It Fl a
+Force the file arguments to be interpreted as ASCII text files.
+.It Fl B
+Do not print blank lines.
+.It Fl b
+Ignore differences of lines that differ by changes in the amount of
+whitespace.
+.It Fl d
+Try to produce fewer differences if possible.
+Note that using this option may take
+.Nm
+longer to run.
+.It Fl E
+Ignore differences of lines that differ by amounts of whitespace due to
+tab expansion.
+.It Fl H
+Assume input files are large and have small, scattered differences.
+.It Fl I Ar pattern
+Ignore differences whose lines match the given
+.Ar pattern .
+Multiple
+.Fl I
+options may be given, and each line must match any for the change to be
+ignored.
+.It Fl i
+Ignore changes in uppercase/lowercase of characters.
+.It Fl l
+Flush output to the left column.
+.It Fl o Ar file
+Store the side-by-side output in the given
+.Ar file .
+When this option is given, there is no limit on the width of the display
+of each file (see the
+.Fl w
+option below).
+.It Fl s
+Do not print lines that are the same in both files.
+.It Fl t
+Expand tabs in the file arguments to the appropriate number of spaces
+they represent, assuming 8-space tabs.
+.It Fl W
+Ignore whitespace completely.
+.It Fl w Ar width
+Set the output display with to
+.Ar width
+columns.
+Each file will get slightly less than half of this number of columns for
+its display.
+By default, if standard input is from a terminal,
+.Nm
+will try to detect the maximum number of columns available, else it use
+130.
+Setting the width to 0 will not limit the display of the lines at all.
+.El
+.Pp
+.Nm
+exits with one of the following codes:
+.Pp
+.Bl -tag -width indent -offset indent -compact
+.It 0
+No differences were found.
+.It 1
+Differences were found.
+.It \*(Gt1
+An error occurred.
+.El
+.Sh ENVIRONMENT
+.Nm
+passes along the following environmental variables to
+.Xr diff 1 .
+.Bl -tag -width TMPDIR
+.It Ev TMPDIR
+If this environmental variable is set,
+.Xr diff 1
+will use it to store its temporary files.
+.El
+.Sh FILES
+.Bl -tag -width /usr/bin/diff -compact
+.It Pa /usr/bin/diff
+default
+.Xr diff 1
+program
+.El
+.Sh STANDARDS
+The
+.Nm
+utility supports GNU-style long arguments for each option described
+above.
+.Sh SEE ALSO
+.Xr diff 1 ,
+.Xr re_format 7 
