@@ -2,9 +2,12 @@
 
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/ioctl.h>
 
 #include <ctype.h>
 #include <err.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <limits.h>
 #include <stdio.h>
@@ -14,6 +17,9 @@
 
 #include "pathnames.h"
 
+#define DEFWIDTH 130
+
+/* Hunk types. */
 #define HT_DEL 1
 #define HT_ADD 2
 #define HT_CHG 3
@@ -21,15 +27,17 @@
 
 struct hunk {
 	int h_type;
-	int h_as;	/* file a start */
-	int h_ae;	/* file a end */
-	int h_bs;	/* file b start */
-	int h_be;	/* file b end */
+	int h_a;	/* file a start */
+	int h_b;	/* file a end */
+	int h_c;	/* file b start */
+	int h_d;	/* file b end */
 };
 
-static		char **buildargv(void);
+static		char  *getline(FILE *);
+static		char **buildargv(char *, char *, char *);
 static		char **buildenvp(void);
-static		int    startdiff(void);
+static		int    startdiff(char *, char *);
+static		void   disp(FILE *, const char *, const char *, char);
 static		void   readhunk(const char *, struct hunk *);
 static __dead	void   usage(void);
 
@@ -78,9 +86,9 @@ static struct option lopts[] = {
 int
 main(int argc, char *argv[])
 {
-	char *lbd, *lba, *lbb, *lbdup = NULL;
+	FILE *fpd, *fpa, *fpb, *outfp;
 	int c, fd, status, lna, lnb;
-	FILE *fpd, *fpa, *fpb;
+	char *lbd, *lba, *lbb;
 	struct hunk h;
 	size_t siz;
 	long l;
@@ -164,41 +172,91 @@ main(int argc, char *argv[])
 	if (argc != 2)
 		usage();
 
+	if (width < 4) {
+		struct winsize ws;
+		char *tty;
+		int ttyfd;
+
+		/* Guess width. */
+		if ((tty = ttyname(STDIN_FILENO)) != NULL) {
+			if ((ttyfd = open(tty, O_RDONLY)) != -1) {
+				if (ioctl(ttyfd, TIOCSWINSZ, &ws) != -1)
+					width = ws.ws_col;
+				(void)close(ttyfd);
+			}
+		}
+		errno = 0;
+		if (width < 4)
+			width = DEFWIDTH;
+	}
+	/* Width for each display, excluding gap in middle. */
+	width = (width - 3) / 2;
+
+	if (outfile == NULL)
+		outfp = stdout;
+	else
+		if ((outfp = fopen(outfile, "w")) == NULL)
+			err(2, "fopen %s", outfile);
+
 	/* XXX: race between now and when diff opens these files. */
 	if ((fpa = fopen(argv[0], "r")) == NULL)
 		err(2, "fopen %s", argv[0]);
 	if ((fpb = fopen(argv[1], "r")) == NULL)
 		err(2, "fopen %s", argv[1]);
 
-	fd = startdiff();
+	fd = startdiff(argv[0], argv[1]);
 	if ((fpd = fdopen(fd, "r")) == NULL)
 		err(2, "fdopen %s", diffprog);
 	lna = lnb = 0;
-	while (!feof(fpd)) {
-		if ((lbd = fgetln(fpd, &siz)) == NULL)
-			err(2, "fgetln %s", diffprog);
-		if (lbd[siz - 1] == '\n')
-			lbd[siz - 1] = '\0';
-		else {
-			lbdup = malloc(siz + 1);
-			memcpy(lbdup, lbd, siz);
-			lbdup[siz] = '\0';
-			lbd = lbdup;
-		}
-
+	while ((lbd = getline(fpd)) != NULL) {
 		readhunk(lbd, &h);
+		while (lna < h.h_a || lnb < h.h_b) {
+			lba = NULL;
+			lbb = NULL;
+			if (lna < h.h_a) {
+				lba = getline(fpa);
+				lna++;
+			}
+			if (lnb < h.h_c) {
+				lbb = getline(fpb);
+				lnb++;
+			}
+			if (lba && lbb) {
+				if (!suppresscommon ||
+				    strcmp(lba, lbb) != 0)
+					disp(outfp, lba, lbb, ' ');
+			}
+			free(lba);
+			free(lbb);
+		}
 		switch (h.h_type) {
-		case HT_DEL:
-			break;
 		case HT_ADD:
+			while (h.h_a <= h.h_b) {
+				lba = getline(fpa);
+				disp(outfp, lba, "", '>');
+				lna++;
+				free(lba);
+			}
 			break;
 		case HT_CHG:
 			break;
+		case HT_DEL:
+			while (h.h_c <= h.h_d) {
+				lbb = getline(fpa);
+				disp(outfp, "", lba, '>');
+				lnb++;
+				free(lbb);
+			}
+			break;
 		case HT_ERR:
-			err(2, "invalid diff output: %s", lbd);
+			errx(2, "invalid diff output: %s", lbd);
 			/* NOTREACHED */
 		}
 /*
+	XXaYY[,ZZ]
+	XXdYY[,ZZ]
+	xx[,YY]cZZ[,QQ]
+
 	17,18d16
 	< ums0 at uhidev0: 3 buttons and Z dir.
 	< wsmouse0 at ums0 mux 0
@@ -215,14 +273,50 @@ main(int argc, char *argv[])
 	> smouse0 at ums0 mux 0
 */
 
-		free(lbdup);
-		lbdup = NULL;
+		free(lbd);
 	}
 	(void)fclose(fpd);
 	(void)fclose(fpa);
 	(void)fclose(fpb);
+
+	if (outfp != stdout)
+		(void)fclose(outfp);
+
+	status = EXIT_SUCCESS;
 	(void)wait(&status);
 	exit(status);
+}
+
+static void
+disp(FILE *fp, const char *a, const char *b, char c)
+{
+	(void)fprintf(fp, "%*.*s %c %*.*s\n", width, width, a, c, width,
+	    width, b);
+}
+
+static char *
+getline(FILE *fp)
+{
+	char *lb, *lbdup = NULL;
+	size_t siz;
+
+	if ((lb = fgetln(fp, &siz)) == NULL) {
+		if (feof(fp))
+			return (NULL);
+		else
+			err(2, "fgetln");
+	}
+	if (lb[siz - 1] == '\n') {
+		lb[siz - 1] = '\0';
+		if ((lb = strdup(lb)) == NULL)
+			err(2, "strdup");
+	} else {
+		lbdup = malloc(siz + 1);
+		memcpy(lbdup, lb, siz);
+		lbdup[siz] = '\0';
+		lb = lbdup;
+	}
+	return (lb);
 }
 
 #define ST_BEG  1	/* beginning */
@@ -240,10 +334,10 @@ readhunk(const char *s, struct hunk *h)
 	const char *p;
 	int i, state;
 
-	h->h_as = 0;
-	h->h_ae = 0;
-	h->h_bs = 0;
-	h->h_be = 0;
+	h->h_a = 0;
+	h->h_b = 0;
+	h->h_c = 0;
+	h->h_d = 0;
 
 	state = ST_BEG;
 	for (p = s; *p != '\0'; p++) {
@@ -257,29 +351,34 @@ readhunk(const char *s, struct hunk *h)
 			switch (state) {
 			case ST_BEG:
 				state = ST_NUM1;
-				h->h_as = i;
+				h->h_a = i;
 				break;
 			case ST_COM1:
 				state = ST_NUM2;
-				h->h_ae = i;
+				h->h_b = i;
 				break;
 			case ST_TYPE:
 				state = ST_NUM3;
-				h->h_bs = i;
+				h->h_c = i;
 				break;
 			case ST_COM2:
 				state = ST_NUM4;
-				h->h_be = i;
+				h->h_d = i;
 				goto end;
 				/* NOTREACHED */
 			default:
 				goto badhunk;
 				/* NOTREACHED */
 			}
+			p--;
 			break;
 		case 'a':
-		case 'c':
 		case 'd':
+			/* These can never be in ST_NUM2. */
+			if (state == ST_NUM2)
+				goto badhunk;
+			/* FALLTHROUGH */
+		case 'c':
 			/* These can skip ST_COM1 and ST_NUM2. */
 			if (state != ST_NUM1 &&
 			    state != ST_NUM2)
@@ -308,12 +407,34 @@ readhunk(const char *s, struct hunk *h)
 	}
 
 end:
-	if (state != ST_NUM2 &&
+	if (state != ST_NUM3 &&
 	    state != ST_NUM4)
 		goto badhunk;
 	if (*p != '\0')
 		goto badhunk;
-	/* XXX: sanity check values. */
+	switch (h->h_type) {
+	case HT_ADD:
+		/* XXaYY[,ZZ] */
+		if (!h->h_c)
+			h->h_c = h->h_b;
+		break;
+	case HT_DEL:
+		/* XXdYY[,ZZ] */
+		if (!h->h_b)
+			h->h_b = h->h_a;
+		break;
+	case HT_CHG:
+		/* XX[,YY]cZZ[,QQ] */
+		if (!h->h_b)
+			h->h_b = h->h_a;
+		if (!h->h_d)
+			h->h_d = h->h_c;
+		break;
+	}
+	/* Sanity check values. */
+	if (h->h_b > h->h_a ||
+	    h->h_d > h->h_c)
+		goto badhunk;
 	return;
 
 badhunk:
@@ -321,13 +442,13 @@ badhunk:
 }
 
 static char **
-buildargv(void)
+buildargv(char *d, char *a, char *b)
 {
 	size_t siz;
 	char **argv;
 	int i;
 
-	siz = 0;
+	siz = 4;
 	if (ignorere != NULL)
 		siz += 2;
 	siz += ascii + expandtabs + ignorecase + minimal + largefiles +
@@ -338,6 +459,7 @@ buildargv(void)
 	if ((argv = calloc(siz, sizeof(*argv))) == NULL)
 		err(2, "calloc");
 	i = 0;
+	argv[i++] = d;
 	if (ascii)
 		argv[i++] = "-a";
 	if (expandtabs)
@@ -360,6 +482,8 @@ buildargv(void)
 		argv[i++] = "-I";
 		argv[i++] = ignorere;
 	}
+	argv[i++] = a;
+	argv[i++] = b;
 	argv[i] = NULL;
 	return (argv);
 }
@@ -372,7 +496,7 @@ buildenvp(void)
 	size_t siz;
 	int i;
 
-	siz = 0;
+	siz = 1;
 	for (ep = environ; *ep != NULL; ep++) {
 		for (fp = passenv; *fp != NULL; fp++)
 		if (strncmp(*ep, *fp, strlen(*fp)) == 0 &&
@@ -394,12 +518,17 @@ buildenvp(void)
 }
 
 static int
-startdiff(void)
+startdiff(char *a, char *b)
 {
-	char **argv, **envp;
+	char **argv, **envp, *dpn;
 	int fd[2];
 
-	argv = buildargv();
+	if ((dpn = strrchr(diffprog, '/')) == NULL)
+		dpn = diffprog;
+	else
+		dpn++;
+
+	argv = buildargv(dpn, a, b);
 	envp = buildenvp();
 
 	if (pipe(fd) == -1)
@@ -411,10 +540,11 @@ startdiff(void)
 		/* NOTREACHED */
 	case 0:
 		(void)close(fd[0]);
-		if (fclose(stdout) == -1)
-			err(2, "fclose <stdout>");
+		if (close(STDOUT_FILENO) == -1)
+			err(2, "close <stdout>");
 		if (dup(fd[1]) == -1)
 			err(2, "dup <pipe>");
+		(void)close(fd[1]);
 		(void)execve(diffprog, argv, envp);
 		free(argv);
 		free(envp);
@@ -422,7 +552,7 @@ startdiff(void)
 		/* NOTREACHED */
 	default:
 		(void)close(fd[1]);
-		(void)fclose(stdin);
+		(void)close(STDIN_FILENO);
 		free(argv);
 		free(envp);
 		break;
