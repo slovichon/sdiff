@@ -1,4 +1,8 @@
 /* $Id$ */
+/*
+ * Written by Jared Yanovich
+ * This file belongs to the public domain.
+ */
 
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -35,115 +39,90 @@ struct hunk {
 	int h_d;	/* file b end */
 };
 
-static		char **buildargv(char *, char *, char *);
-static		char **buildenvp(void);
-static		int    getline(FILE *, struct lbuf *);
-static		int    readhunk(const char *, struct hunk *);
-static		int    startdiff(char *, char *);
-static		void   disp(FILE *, struct lbuf *, struct lbuf *, char);
-static __dead	void   usage(void);
+char	**buildenvp(void);
+int	  getline(FILE *, struct lbuf *);
+int	  readhunk(const char *, struct hunk *);
+int	  startdiff(char **, char **);
+void	  addarg(char ***, size_t *, char *);
+void	  disp(FILE *, struct lbuf *, struct lbuf *, char);
+void	  usage(void) __attribute__((__noreturn__));
 
-static char *diffprog = _PATH_DIFF;
-static char *ignorere = NULL;
-static char *outfile = NULL;
-static int ascii = 0;
-static int expandtabs = 0;
-static int ignorecase = 0;
-static int ignoretab = 0;
-static int ignoreblank = 0;
-static int ignorews = 0;
-static int ignorewsamt = 0;
-static int largefiles = 0;
-static int leftcol = 0;
-static int minimal = 0;
-static int stripcr = 0;
-static int suppresscommon = 0;
-static int width = 0;
+char	 *diffprog = _PATH_DIFF;
+char	 *outfile = NULL;
+int	  leftcol = 0;
+int	  stripcr = 0;
+int	  suppresscommon = 0;
+int	  width = 0;
 
-static char *passenv[] = {
+char *passenv[] = {
 	"TMPDIR",
 	NULL
 };
 
-static struct option lopts[] = {
-	{ "diff-program",		required_argument,	NULL, 'D' },
-	{ "expand-tabs",		no_argument,		NULL, 't' },
-	{ "ignore-all-space",		no_argument,		NULL, 'W' },
-	{ "ignore-blank-lines",		no_argument,		NULL, 'B' },
-	{ "ignore-case",		no_argument,		NULL, 'i' },
-	{ "ignore-matching-lines",	required_argument,	NULL, 'I' },
+struct option lopts[] = {
+	{ "text",			no_argument,		NULL, 'a' },
 	{ "ignore-space-change",	no_argument,		NULL, 'b' },
-	{ "ignore-tab-expansion",	no_argument,		NULL, 'E' },
-	{ "left-column",		no_argument,		NULL, 'l' },
+	{ "diff-program",		required_argument,	NULL, 'D' },
 	{ "minimal",			no_argument,		NULL, 'd' },
+	{ "ignore-matching-lines",	required_argument,	NULL, 'I' },
+	{ "ignore-case",		no_argument,		NULL, 'i' },
+	{ "left-column",		no_argument,		NULL, 'l' },
 	{ "output",			required_argument,	NULL, 'o' },
-	{ "speed-large-files",		no_argument,		NULL, 'H' },
+	{ "expand-tabs",		no_argument,		NULL, 't' },
 	{ "strip-trailing-cr",		no_argument,		NULL, 'S' },
 	{ "suppress-common-lines",	no_argument,		NULL, 's' },
-	{ "text",			no_argument,		NULL, 'a' },
+	{ "ignore-all-space",		no_argument,		NULL, 'W' },
 	{ "width",			required_argument,	NULL, 'w' },
 	{ NULL,				0,			NULL, '\0' }
 };
 
-#define SKIPLINE(fp)				\
-	do {					\
-		while (fgetc(fp) != '\n')	\
-			;			\
-	} while (0)
+void
+addarg(char ***s, size_t *siz, char *p)
+{
+	char **t;
+
+	if ((t = realloc(*s, sizeof(**s) * ++*siz)) == NULL)
+		err(2, NULL);
+	t[*siz - 1] = p;
+	*s = t;
+}
 
 int
 main(int argc, char *argv[])
 {
+	char **diffargs, **diffenvp, *s, *p, *t;
 	int c, fd, status, lna, lnb, i, j;
-	FILE *fpd, *fpa, *fpb, *outfp;
-	struct lbuf lbd, lba, lbb;
+	struct lbuf lbd, lb, lbc;
+	FILE *fpd, *outfp;
 	struct hunk h;
 	size_t siz;
 	long l;
 
-	while ((c = getopt_long(argc, argv, "aBbD:dEHI:ilo:SstWw:",
-	    lopts, NULL)) != -1) {
+	diffargs = NULL;
+	siz = 0;
+	/* Placeholder for program name. */
+	addarg(&diffargs, &siz, NULL);
+	addarg(&diffargs, &siz, "--sdiff-merge-assist");
+	while ((c = getopt_long(argc, argv, "abdI:ilo:stWw:", lopts,
+	    NULL)) != -1) {
 		switch (c) {
 		case 'a':
-			ascii = 1;
-			break;
-		case 'B':
-			errx(2, "-B not yet supported");
-
-			ignoreblank = 1;
+			addarg(&diffargs, &siz, "-a");
 			break;
 		case 'b':
-			ignorewsamt = 1;
+			addarg(&diffargs, &siz, "-b");
 			break;
 		case 'D':
 			diffprog = optarg;
 			break;
 		case 'd':
-			minimal = 1;
-			break;
-		case 'E':
-			errx(2, "-E not yet supported");
-
-			ignoretab = 1;
-			break;
-		case 'H':
-			errx(2, "-H not yet supported");
-
-			largefiles = 1;
+			addarg(&diffargs, &siz, "-d");
 			break;
 		case 'I':
-			if (ignorere == NULL)
-				siz = 1; /* NUL */
-			else
-				siz = strlen(ignorere);
-			siz += strlen(optarg) + 1; /* | */
-			if ((ignorere = realloc(ignorere, siz)) == NULL)
-				err(2, "realloc");
-			strlcat(ignorere, "|", siz);
-			strlcat(ignorere, optarg, siz);
+			addarg(&diffargs, &siz, argv[optind]);
 			break;
 		case 'i':
-			ignorecase = 1;
+			addarg(&diffargs, &siz, "-i");
 			break;
 		case 'l':
 			leftcol = 1;
@@ -158,10 +137,10 @@ main(int argc, char *argv[])
 			suppresscommon = 1;
 			break;
 		case 't':
-			expandtabs = 1;
+			addarg(&diffargs, &siz, "-t");
 			break;
 		case 'W':
-			ignorews = 1;
+			addarg(&diffargs, &siz, "-w");
 			break;
 		case 'w':
 			if ((l = strtoul(optarg, NULL, 10)) < 0 ||
@@ -186,13 +165,12 @@ main(int argc, char *argv[])
 		int ttyfd;
 
 		/* Guess width. */
-		if ((tty = ttyname(STDIN_FILENO)) != NULL) {
+		if ((tty = ttyname(STDIN_FILENO)) != NULL)
 			if ((ttyfd = open(tty, O_RDONLY)) != -1) {
 				if (ioctl(ttyfd, TIOCGWINSZ, &ws) != -1)
 					width = ws.ws_col;
 				(void)close(ttyfd);
 			}
-		}
 		errno = 0;
 		if (width < 4)
 			width = DEFWIDTH;
@@ -202,135 +180,169 @@ main(int argc, char *argv[])
 
 	if (outfile == NULL)
 		outfp = stdout;
-	else
-		if ((outfp = fopen(outfile, "w")) == NULL)
-			err(2, "fopen %s", outfile);
+	else if ((outfp = fopen(outfile, "w")) == NULL)
+		err(2, "fopen %s", outfile);
 
-	startdiff(&fd, argv[0], argv[1], &fpa, &fpb);
+	addarg(&diffargs, &siz, argv[0]);
+	addarg(&diffargs, &siz, argv[1]);
+	addarg(&diffargs, &siz, (char *)NULL);
+
+	if ((diffargs[0] = strrchr(diffprog, '/')) == NULL)
+		diffargs[0] = diffprog;
+	else
+		diffargs[0]++;
+
+	diffenvp = buildenvp();
+	fd = startdiff(diffargs, diffenvp);
+	free(diffargs);
+	free(diffenvp);
+
 	if ((fpd = fdopen(fd, "r")) == NULL)
 		err(2, "fdopen %s", diffprog);
 	lna = lnb = 0;
 	LBUF_INIT(lbd);
-	LBUF_INIT(lba);
-	LBUF_INIT(lbb);
+	LBUF_INIT(lb);
+	LBUF_INIT(lbc);
 	while (getline(fpd, &lbd)) {
 		if (!readhunk(LBUF_GET(lbd), &h))
-			goto badhunk;
+			errx(2, "malformed input: %s",
+			    LBUF_GET(lbd));
 		j = MIN(h.h_c - lnb, h.h_a - lna);
 		if (h.h_type == HT_CHG)
 			j--;
 		for (i = 0; i < j; lna++, lnb++, i++) {
-			if (!getline(fpa, &lba) ||
-			    !getline(fpb, &lbb))
-				goto badhunk;
-			if (strcmp(LBUF_GET(lba), LBUF_GET(lbb)) != 0)
-				goto badhunk;
+			getline(fpd, &lb);
 			if (leftcol)
-				disp(outfp, &lba, NULL, '(');
+				disp(outfp, &lb, NULL, '(');
 			else if (!suppresscommon)
-				disp(outfp, &lba, &lbb, ' ');
-			LBUF_RESET(lba);
-			LBUF_RESET(lbb);
+				disp(outfp, &lb, &lb, ' ');
+			LBUF_RESET(lb);
 		}
+		/* Test for EOF. */
+		if ((c = fgetc(fpd)) == EOF && h.h_type == HT_ADD)
+			break;
+		ungetc(c, fpd);
 		switch (h.h_type) {
 		case HT_ADD:
 			for (; h.h_c <= h.h_d; h.h_c++, lnb++) {
-				if (!getline(fpb, &lbb))
-					goto badhunk;
-				/* XXX: compare for consistency. */
-				SKIPLINE(fpd);
-				disp(outfp, NULL, &lbb, '>');
-				LBUF_RESET(lbb);
+				if (fgetc(fpd) != '>' ||
+				    fgetc(fpd) != ' ' ||
+				    !getline(fpd, &lb))
+					errx(2, "malformed input: %s",
+					    LBUF_GET(lbd));
+				disp(outfp, NULL, &lb, '>');
+				LBUF_RESET(lb);
 			}
 			break;
 		case HT_CHG:
 			/* Print lines that were changed. */
+
+			/* Can't seek in a pipe; read it all in. */
+			for (i = 0; i < h.h_b - h.h_a; i++) {
+				if (fgetc(fpd) != '<' ||
+				    fgetc(fpd) != ' ' ||
+				    !getline(fpd, &lbc))
+					errx(2, "malformed input: %s",
+					    LBUF_GET(lbd));
+				LBUF_CHOP(lbc);
+				LBUF_APPEND(lbc, '\n');
+			}
+			LBUF_APPEND(lbc, '\0');
+			/*
+			 * `p' is the original pointer.
+			 * `s' points to the current line.
+			 * `t' (later) points to the next line.
+			 */
+			p = s = LBUF_GET(lbc);
+
+			/* Read the dummy `---' line. */
+			if (!getline(fpd, &lb) || strcmp(LBUF_GET(lb),
+			    "---\n") != 0)
+				errx(2, "malformed input: %s",
+				    LBUF_GET(lbd));
+
 			j = MIN(h.h_b - h.h_a, h.h_d - h.h_c);
 			for (i = 0; i <= j;
 			     i++, h.h_a++, h.h_c++, lna++, lnb++) {
 				/*
-				 * By definition (i.e., MIN() above),
-				 * these should return content.
+				 * By definition (i.e., MIN(), above),
+				 * this should return content.
 				 */
-				if (!getline(fpa, &lba) ||
-				    !getline(fpb, &lbb))
-					goto badhunk;
-				disp(outfp, &lba, &lbb, '|');
-				LBUF_RESET(lba);
-				LBUF_RESET(lbb);
-				/* XXX: validate. */
-				SKIPLINE(fpd);
-				SKIPLINE(fpd);
+				if (fgetc(fpd) != '>' ||
+				    fgetc(fpd) != ' ' ||
+				    !getline(fpd, &lb) || s == NULL)
+					errx(2, "malformed input: %s",
+					    LBUF_GET(lbd));
+				if ((t = strchr(s, '\n')) != NULL)
+					*t = '\0';
+				s = t;
+				disp(outfp, &lb, &lbc, '|');
+				LBUF_RESET(lb);
 			}
 			/* Print lines that were deleted. */
 			for (; h.h_a <= h.h_b; h.h_a++, lna++) {
-				if (!getline(fpa, &lba))
-					goto badhunk;
-				disp(outfp, &lba, NULL, '<');
-				LBUF_RESET(lba);
-				SKIPLINE(fpd);
+				if (s == NULL)
+					errx(2, "malformed input: %s",
+					    LBUF_GET(lbd));
+				if ((t = strchr(s, '\n')) != NULL)
+					*t = '\0';
+				s = t;
+				disp(outfp, &lbc, NULL, '<');
 			}
 			/* Print lines that were added. */
 			for (; h.h_c <= h.h_d; h.h_c++, lnb++) {
-				if (!getline(fpb, &lbb))
-					goto badhunk;
-				disp(outfp, NULL, &lbb, '>');
-				LBUF_RESET(lbb);
-				SKIPLINE(fpd);
+				if (fgetc(fpd) != '>' ||
+				    fgetc(fpd) != ' ' ||
+				    !getline(fpd, &lb))
+					errx(2, "malformed input: %s",
+					    LBUF_GET(lbd));
+				disp(outfp, NULL, &lb, '>');
+				LBUF_RESET(lb);
 			}
-			/*
-			 * One of the lines must be a `---' separator.
-			 */
-			SKIPLINE(fpd);
+			LBUF_SET(lbc, p);
+			LBUF_RESET(lbc);
 			break;
 		case HT_DEL:
 			for (; h.h_a <= h.h_b; h.h_a++, lna++) {
-				if (!getline(fpa, &lba))
-					goto badhunk;
+				if (fgetc(fpd) != '<' ||
+				    fgetc(fpd) != ' ' ||
+				    !getline(fpd, &lb))
+					errx(2, "malformed input: %s",
+					    LBUF_GET(lbd));
 				/* XXX: compare for consistency. */
-				SKIPLINE(fpd);
-				disp(outfp, &lba, NULL, '<');
-				LBUF_RESET(lba);
+				disp(outfp, &lb, NULL, '<');
+				LBUF_RESET(lb);
 			}
 			break;
-			/* NOTREACHED */
 		}
 		LBUF_RESET(lbd);
 	}
-	/* Print remaining lines */
-	if (leftcol || !suppresscommon) {
+	/* Print remaining lines. */
+	if (leftcol || !suppresscommon)
 		for (;;) {
 			/* XXX: These should both be NULL when one is. */
-			if (!getline(fpa, &lba) ||
-			    !getline(fpb, &lbb))
+			if (!getline(fpd, &lb))
 				break;
 			if (leftcol)
-				disp(outfp, &lba, NULL, '(');
+				disp(outfp, &lb, NULL, '(');
 			else
-				disp(outfp, &lba, &lbb, ' ');
-			LBUF_RESET(lba);
-			LBUF_RESET(lbb);
+				disp(outfp, &lb, &lb, ' ');
+			LBUF_RESET(lb);
 		}
-	}
 	(void)fclose(fpd);
-	(void)fclose(fpa);
-	(void)fclose(fpb);
 	LBUF_FREE(lbd);
-	LBUF_FREE(lba);
-	LBUF_FREE(lbb);
+	LBUF_FREE(lb);
+	LBUF_FREE(lbc);
 
 	if (outfp != stdout)
 		(void)fclose(outfp);
 
-	status = EXIT_SUCCESS;
+	status = 0;
 	(void)wait(&status);
-	exit(status);
-
-badhunk:
-	errx(2, "invalid diff output: %s", LBUF_GET(lbd));
+	exit(WEXITSTATUS(status));
 }
 
-static void
+void
 disp(FILE *fp, struct lbuf *a, struct lbuf *b, char c)
 {
 	(void)fprintf(fp, "%-*.*s %c %-*.*s\n", width, width,
@@ -338,16 +350,15 @@ disp(FILE *fp, struct lbuf *a, struct lbuf *b, char c)
 	    b == NULL ? "" : LBUF_GET(*b));
 }
 
-static int
+int
 getline(FILE *fp, struct lbuf *lb)
 {
 	int c, read;
 
 	for (read = 0; (c = fgetc(fp)) != EOF && c != '\n'; read++)
 		LBUF_APPEND(*lb, (char)c);
-	/* XXX: extend API. */
 	if (stripcr && lb->lb_buf[lb->lb_pos - 1] == '\r')
-		lb->lb_pos--;
+		LBUF_CHOP(*lb);
 	LBUF_APPEND(*lb, '\0');
 	return (read > 0);
 }
@@ -361,7 +372,7 @@ getline(FILE *fp, struct lbuf *lb)
 #define ST_COM2 7	/* after comma 2 */
 #define ST_NUM4 8	/* after number 4 */
 
-static int
+int
 readhunk(const char *s, struct hunk *h)
 {
 	const char *p;
@@ -398,10 +409,8 @@ readhunk(const char *s, struct hunk *h)
 				state = ST_NUM4;
 				h->h_d = i;
 				goto check;
-				/* NOTREACHED */
 			default:
 				return (0);
-				/* NOTREACHED */
 			}
 			p--;
 			break;
@@ -434,7 +443,6 @@ readhunk(const char *s, struct hunk *h)
 			break;
 		default:
 			return (0);
-			/* NOTREACHED */
 		}
 	}
 
@@ -480,54 +488,7 @@ check:
 	return (1);
 }
 
-static char **
-buildargv(char *d, char *a, char *b)
-{
-	size_t siz;
-	char **argv;
-	int i;
-
-	siz = 4;	/* Program name + file1 + file2 + NULL. */
-	if (ignorere != NULL)
-		siz += 2;
-	siz += ascii + expandtabs + ignorecase + minimal + largefiles +
-	       ignorewsamt + ignorews + ignoretab + ignoreblank;
-	if (ignorere)
-		siz += 2;
-
-	if ((argv = calloc(siz, sizeof(*argv))) == NULL)
-		err(2, "calloc");
-	i = 0;
-	argv[i++] = d;
-	if (ascii)
-		argv[i++] = "-a";
-	if (expandtabs)
-		argv[i++] = "-t";
-	if (ignorecase)
-		argv[i++] = "-i";
-	if (minimal)
-		argv[i++] = "-d";
-	if (largefiles)
-		argv[i++] = "-H";
-	if (ignorewsamt)
-		argv[i++] = "-b";
-	if (ignorews)
-		argv[i++] = "-w";
-	if (ignoretab)
-		argv[i++] = "-E";
-	if (ignoreblank)
-		argv[i++] = "-B";
-	if (ignorere != NULL) {
-		argv[i++] = "-I";
-		argv[i++] = ignorere;
-	}
-	argv[i++] = a;
-	argv[i++] = b;
-	argv[i] = NULL;
-	return (argv);
-}
-
-static char **
+char **
 buildenvp(void)
 {
 	char **ep, **fp, **envp;
@@ -535,7 +496,8 @@ buildenvp(void)
 	size_t siz;
 	int i;
 
-	siz = 1;	/* Save 1 for terminating NULL. */
+	/* Save one for terminating NULL. */
+	siz = 1;
 	for (fp = passenv; *fp != NULL; fp++)
 		for (ep = environ; *ep != NULL; ep++)
 			if (strncmp(*ep, *fp, strlen(*fp)) == 0 &&
@@ -557,50 +519,10 @@ buildenvp(void)
 	return (envp);
 }
 
-static void
-startdiff(int *fd, char *fna, char *fnb, FILE *fpa, FILE *fpb)
+int
+startdiff(char **argv, char **envp)
 {
-	char **argv, **envp, *dpn;
-	int loop, diff; fd[2];
-
-	loop = diff = fileno();
-
-	if (strcmp(fna, "-") == 0 || strcmp(fnb, "-") == 0) {
-		switch (fork()) {
-		case -1:
-			err(2, "fork");
-			/* NOTREACHED */
-		case 0:
-			spray(FILENO(stdin), *loop, *diffin);
-			/* NOTREACHED */
-		}
-	}
-
-	if (strcmp(a, "-") == 0) {
-		if ((*fpa = fdopen(dupfd, "r")) == NULL)
-			err(2, "fdopen <stdin>");
-	} else {
-		/* XXX: race between now and when diff opens this file. */
-		if ((*fpa = fopen(fna, "r")) == NULL)
-			err(2, "fopen %s", argv[0]);
-	}
-
-	if (strcmp(fnb, "-") == 0) {
-		if ((*fpa = fdopen(dupfd, "r")) == NULL)
-			err(2, "fdopen <stdin>");
-	} else {
-		/* XXX: race between now and when diff opens this file. */
-		if ((fpb = fopen(fnb, "r")) == NULL)
-			err(2, "fopen %s", argv[1]);
-	}
-
-	if ((dpn = strrchr(diffprog, '/')) == NULL)
-		dpn = diffprog;
-	else
-		dpn++;
-
-	argv = buildargv(dpn, fna, fnb);
-	envp = buildenvp();
+	int fd[2];
 
 	if (pipe(fd) == -1)
 		err(2, "pipe");
@@ -617,51 +539,20 @@ startdiff(int *fd, char *fna, char *fnb, FILE *fpa, FILE *fpb)
 			err(2, "dup <pipe>");
 		(void)close(fd[1]);
 		(void)execve(diffprog, argv, envp);
-		free(argv);
-		free(envp);
 		err(2, "execve");
 		/* NOTREACHED */
 	}
 	(void)close(fd[1]);
 	(void)close(STDIN_FILENO);
-	free(argv);
-	free(envp);
 	return (fd[0]);
 }
 
 void
-spray(int fdin, int fdout, int fdout2)
-{
-	struct bufchunk *bc = NULL;
-	char buf[BUFSIZ], *p;
-	ssize_t nread;
-	size_t len;
-
-	while ((nread = read(fd, buf, sizeof(buf) - 1)) != 0 &&
-	    nread != -1) {
-		buf[nread] = '\0';
-		(void)write(fdout, buf, nread);
-		if ((p = strdup(buf)) == NULL)
-			err(2, "strdup");
-		bc_push(&bc, p);
-	}
-
-	if (len == -1)
-		err(2, "read");
-
-	while (bc != NULL) {
-		p = bc_pop(&bc);
-		(void)write(fdout2, p, strlen(p));
-		free(p);
-	}
-}
-
-static __dead void
 usage(void)
 {
 	extern char *__progname;
 
-	(void)fprintf(stderr, "usage: %s [-abdHilstW] [-I pattern] "
+	(void)fprintf(stderr, "usage: %s [-abdilstW] [-I pattern] "
 		"[-o file] [-w width] file1 file2\n", __progname);
 	exit(2);
 }
