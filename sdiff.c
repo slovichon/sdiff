@@ -17,13 +17,14 @@
 
 #include "pathnames.h"
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
 #define DEFWIDTH 130
 
 /* Hunk types. */
 #define HT_DEL 1
 #define HT_ADD 2
 #define HT_CHG 3
-#define HT_ERR 4
 
 struct hunk {
 	int h_type;
@@ -38,7 +39,7 @@ static		char **buildargv(char *, char *, char *);
 static		char **buildenvp(void);
 static		int    startdiff(char *, char *);
 static		void   disp(FILE *, const char *, const char *, char);
-static		void   readhunk(const char *, struct hunk *);
+static		int    readhunk(const char *, struct hunk *);
 static __dead	void   usage(void);
 
 static char *diffprog = _PATH_DIFF;
@@ -86,8 +87,8 @@ static struct option lopts[] = {
 int
 main(int argc, char *argv[])
 {
+	int c, fd, status, lna, lnb, i, j;
 	FILE *fpd, *fpa, *fpb, *outfp;
-	int c, fd, status, lna, lnb;
 	char *lbd, *lba, *lbb;
 	struct hunk h;
 	size_t siz;
@@ -180,7 +181,7 @@ main(int argc, char *argv[])
 		/* Guess width. */
 		if ((tty = ttyname(STDIN_FILENO)) != NULL) {
 			if ((ttyfd = open(tty, O_RDONLY)) != -1) {
-				if (ioctl(ttyfd, TIOCSWINSZ, &ws) != -1)
+				if (ioctl(ttyfd, TIOCGWINSZ, &ws) != -1)
 					width = ws.ws_col;
 				(void)close(ttyfd);
 			}
@@ -209,70 +210,76 @@ main(int argc, char *argv[])
 		err(2, "fdopen %s", diffprog);
 	lna = lnb = 0;
 	while ((lbd = getline(fpd)) != NULL) {
-		readhunk(lbd, &h);
-		while (lna < h.h_a || lnb < h.h_b) {
-			lba = NULL;
-			lbb = NULL;
-			if (lna < h.h_a) {
-				lba = getline(fpa);
-				lna++;
-			}
-			if (lnb < h.h_c) {
-				lbb = getline(fpb);
-				lnb++;
-			}
-			if (lba && lbb) {
-				if (!suppresscommon ||
-				    strcmp(lba, lbb) != 0)
-					disp(outfp, lba, lbb, ' ');
-			}
+		if (!readhunk(lbd, &h))
+			goto badhunk;
+		j = MIN(h.h_c - lnb, h.h_a - lna);
+		for (i = 0; i < j; lna++, lnb++, i++) {
+			if ((lba = getline(fpa)) == NULL)
+				goto badhunk;
+			if ((lbb = getline(fpb)) == NULL)
+				goto badhunk;
+			if (strcmp(lba, lbb) != 0)
+				goto badhunk;
+			if (!suppresscommon)
+				disp(outfp, lba, lbb, ' ');
 			free(lba);
 			free(lbb);
 		}
 		switch (h.h_type) {
 		case HT_ADD:
-			while (h.h_a <= h.h_b) {
-				lba = getline(fpa);
-				disp(outfp, lba, "", '>');
-				lna++;
-				free(lba);
-			}
-			break;
-		case HT_CHG:
-			break;
-		case HT_DEL:
-			while (h.h_c <= h.h_d) {
-				lbb = getline(fpa);
-				disp(outfp, "", lba, '>');
-				lnb++;
+			for (; h.h_c <= h.h_d; h.h_c++, lnb++) {
+				if ((lbb = getline(fpb)) == NULL)
+					goto badhunk;
+				/* XXX: compare for consistency. */
+				/* Skip past a line. */
+				while (fgetc(fpd) != '\n')
+					;
+				disp(outfp, "", lbb, '>');
 				free(lbb);
 			}
 			break;
-		case HT_ERR:
-			errx(2, "invalid diff output: %s", lbd);
+		case HT_CHG:
+			/* Print lines that were changed. */
+			j = MIN(h.h_b - h.h_a, h.h_d - h.h_c);
+			for (i = 0; i < j;
+			     i++, h.h_a++, h.h_c++, lna++, lnb++) {
+				if ((lba = getline(fpa)) == NULL)
+					goto badhunk;
+				if ((lbb = getline(fpb)) == NULL)
+					goto badhunk;
+				disp(outfp, lba, lbb, '|');
+				free(lba);
+				free(lbb);
+			}
+			/* Print lines that were deleted. */
+			for (; h.h_a <= h.h_b; h.h_a++, lna++) {
+				if ((lba = getline(fpa)) == NULL)
+					goto badhunk;
+				disp(outfp, lba, "", '<');
+				free(lba);
+			}
+			/* Print lines that were added. */
+			for (; h.h_c <= h.h_d; h.h_c++, lnb++) {
+				if ((lbb = getline(fpb)) == NULL)
+					goto badhunk;
+				disp(outfp, "", lbb, '>');
+				free(lbb);
+			}
+			break;
+		case HT_DEL:
+			for (; h.h_a <= h.h_b; h.h_a++, lna++) {
+				if ((lba = getline(fpa)) == NULL)
+					goto badhunk;
+				/* XXX: compare for consistency. */
+				/* Skip past a line. */
+				while (fgetc(fpd) != '\n')
+					;
+				disp(outfp, lba, "", '<');
+				free(lba);
+			}
+			break;
 			/* NOTREACHED */
 		}
-/*
-	XXaYY[,ZZ]
-	XXdYY[,ZZ]
-	xx[,YY]cZZ[,QQ]
-
-	17,18d16
-	< ums0 at uhidev0: 3 buttons and Z dir.
-	< wsmouse0 at ums0 mux 0
-
-	33a32
-	> pfr_get_tables: corruption detected (3).
-
-	36a36
-	> pfr_get_tables: corruption detected (1).
-
-	329c329
-	< wsmouse0 at ums0 mux 0
-	---
-	> smouse0 at ums0 mux 0
-*/
-
 		free(lbd);
 	}
 	(void)fclose(fpd);
@@ -285,13 +292,16 @@ main(int argc, char *argv[])
 	status = EXIT_SUCCESS;
 	(void)wait(&status);
 	exit(status);
+
+badhunk:
+	errx(2, "invalid diff output: %s", lbd);
 }
 
 static void
 disp(FILE *fp, const char *a, const char *b, char c)
 {
-	(void)fprintf(fp, "%*.*s %c %*.*s\n", width, width, a, c, width,
-	    width, b);
+	(void)fprintf(fp, "%-*.*s %c %-*.*s\n", width, width, a, c,
+	    width, width, b);
 }
 
 static char *
@@ -328,7 +338,7 @@ getline(FILE *fp)
 #define ST_COM2 7	/* after comma 2 */
 #define ST_NUM4 8	/* after number 4 */
 
-static void
+static int
 readhunk(const char *s, struct hunk *h)
 {
 	const char *p;
@@ -364,25 +374,24 @@ readhunk(const char *s, struct hunk *h)
 			case ST_COM2:
 				state = ST_NUM4;
 				h->h_d = i;
-				goto end;
+				goto check;
 				/* NOTREACHED */
 			default:
-				goto badhunk;
+				return (0);
 				/* NOTREACHED */
 			}
 			p--;
 			break;
 		case 'a':
 		case 'd':
-			/* These can never be in ST_NUM2. */
-			if (state == ST_NUM2)
-				goto badhunk;
-			/* FALLTHROUGH */
 		case 'c':
-			/* These can skip ST_COM1 and ST_NUM2. */
+			/*
+			 * These can skip ST_COM1 and ST_NUM2.
+			 * Fine-grained checking below.
+			 */
 			if (state != ST_NUM1 &&
 			    state != ST_NUM2)
-				goto badhunk;
+				return (0);
 			state = ST_TYPE;
 			if (*p == 'a')
 				h->h_type = HT_ADD;
@@ -394,33 +403,44 @@ readhunk(const char *s, struct hunk *h)
 		case ',':
 			if (state != ST_NUM1 &&
 			    state != ST_NUM3)
-				goto badhunk;
+				return (0);
 			if (state == ST_NUM1)
 				state = ST_COM1;
 			else
 				state = ST_COM2;
 			break;
 		default:
-			goto badhunk;
+			return (0);
 			/* NOTREACHED */
 		}
 	}
 
-end:
+check:
 	if (state != ST_NUM3 &&
 	    state != ST_NUM4)
-		goto badhunk;
+		return (0);
 	if (*p != '\0')
-		goto badhunk;
+		return (0);
+	/* Fill in disambiguous values and sanity check. */
 	switch (h->h_type) {
 	case HT_ADD:
+		if (h->h_b)
+			return (0);
 		/* XXaYY[,ZZ] */
-		if (!h->h_c)
-			h->h_c = h->h_b;
+		if (h->h_d) {
+			if (h->h_c > h->h_d)
+				return (0);
+		} else
+			h->h_d = h->h_c;
 		break;
 	case HT_DEL:
-		/* XXdYY[,ZZ] */
-		if (!h->h_b)
+		if (h->h_d)
+			return (0);
+		/* XX[,YY]dZZ */
+		if (h->h_b) {
+			if (h->h_a > h->h_b)
+				return (0);
+		} else
 			h->h_b = h->h_a;
 		break;
 	case HT_CHG:
@@ -429,16 +449,12 @@ end:
 			h->h_b = h->h_a;
 		if (!h->h_d)
 			h->h_d = h->h_c;
+		if (h->h_a > h->h_b ||
+		    h->h_c > h->h_d)
+			return (0);
 		break;
 	}
-	/* Sanity check values. */
-	if (h->h_b > h->h_a ||
-	    h->h_d > h->h_c)
-		goto badhunk;
-	return;
-
-badhunk:
-	h->h_type = HT_ERR;
+	return (1);
 }
 
 static char **
@@ -448,7 +464,7 @@ buildargv(char *d, char *a, char *b)
 	char **argv;
 	int i;
 
-	siz = 4;
+	siz = 4;	/* Program name + file1 + file2 + NULL. */
 	if (ignorere != NULL)
 		siz += 2;
 	siz += ascii + expandtabs + ignorecase + minimal + largefiles +
@@ -496,23 +512,24 @@ buildenvp(void)
 	size_t siz;
 	int i;
 
-	siz = 1;
-	for (ep = environ; *ep != NULL; ep++) {
-		for (fp = passenv; *fp != NULL; fp++)
-		if (strncmp(*ep, *fp, strlen(*fp)) == 0 &&
-		    (*ep)[strlen(*fp)] == '=') {
-			siz++;
-		}
-	}
+	siz = 1;	/* Save 1 for terminating NULL. */
+	for (fp = passenv; *fp != NULL; fp++)
+		for (ep = environ; *ep != NULL; ep++)
+			if (strncmp(*ep, *fp, strlen(*fp)) == 0 &&
+			    (*ep)[strlen(*fp)] == '=') {
+				siz++;
+				break;
+			}
 	if ((envp = calloc(siz, sizeof(*envp))) == NULL)
 		err(2, "calloc");
-	for (i = 0, ep = environ; *ep != NULL; ep++) {
-		for (fp = passenv; *fp != NULL; fp++)
-		if (strncmp(*ep, *fp, strlen(*fp)) == 0 &&
-		    (*ep)[strlen(*fp)] == '=') {
-			envp[i++] = *ep;
-		}
-	}
+	i = 0;
+	for (fp = passenv; *fp != NULL; fp++)
+		for (ep = environ; *ep != NULL; ep++)
+			if (strncmp(*ep, *fp, strlen(*fp)) == 0 &&
+			    (*ep)[strlen(*fp)] == '=') {
+				envp[i++] = *ep;
+				break;
+			}
 	envp[i] = NULL;
 	return (envp);
 }
