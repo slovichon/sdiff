@@ -235,9 +235,7 @@ main(int argc, char *argv[])
 			}
 			break;
 		case HT_CHG:
-			/* Print lines that were changed. */
-
-			/* Can't seek in a pipe; read it all in. */
+			/* Can't seek on a pipe; read it all in. */
 			for (i = 0; i < h.h_b - h.h_a; i++) {
 				if (fgetc(fpd) != '<' ||
 				    fgetc(fpd) != ' ' ||
@@ -261,12 +259,13 @@ main(int argc, char *argv[])
 				errx(2, "malformed input: %s",
 				    LBUF_GET(lbd));
 
+			/* Print lines that were changed. */
 			j = MIN(h.h_b - h.h_a, h.h_d - h.h_c);
 			for (i = 0; i <= j;
 			     i++, h.h_a++, h.h_c++, lna++, lnb++) {
 				/*
 				 * By definition (i.e., MIN(), above),
-				 * this should return content.
+				 * this _should_ return content.
 				 */
 				if (fgetc(fpd) != '>' ||
 				    fgetc(fpd) != ' ' ||
@@ -309,7 +308,6 @@ main(int argc, char *argv[])
 				    !getline(fpd, &lb))
 					errx(2, "malformed input: %s",
 					    LBUF_GET(lbd));
-				/* XXX: compare for consistency. */
 				disp(outfp, &lb, NULL, '<');
 				LBUF_RESET(lb);
 			}
@@ -320,7 +318,6 @@ main(int argc, char *argv[])
 	/* Print remaining lines. */
 	if (leftcol || !suppresscommon)
 		for (;;) {
-			/* XXX: These should both be NULL when one is. */
 			if (!getline(fpd, &lb))
 				break;
 			if (leftcol)
