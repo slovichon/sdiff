@@ -1,8 +1,9 @@
 /* $Id$ */
 
 struct lbuf {
-	int pos, max;
-	char *buf;
+	int	 lb_pos;
+	int	 lb_max;
+	char	*lb_buf;
 };
 
 char *lbuf_get(struct lbuf *);

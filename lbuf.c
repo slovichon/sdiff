@@ -9,35 +9,36 @@
 void
 lbuf_init(struct lbuf *lb)
 {
-	lb->pos = lb->max = -1;
-	lb->buf = NULL;
+	lb->lb_pos = lb->lb_max = -1;
+	lb->lb_buf = NULL;
 }
 
 void
 lbuf_append(struct lbuf *lb, char ch)
 {
-	if (++lb->pos >= lb->max) {
-		lb->max += 30;
-		if ((lb->buf = realloc(lb->buf, lb->max)) == NULL)
+	if (++lb->lb_pos >= lb->lb_max) {
+		lb->lb_max += 30;
+		if ((lb->lb_buf = realloc(lb->lb_buf, lb->lb_max *
+		     sizeof(*lb->lb_buf))) == NULL)
 			err(1, "lbuf_append");
 	}
-	lb->buf[lb->pos] = ch;
+	lb->lb_buf[lb->lb_pos] = ch;
 }
 
 char *
 lbuf_get(struct lbuf *lb)
 {
-	return (lb->buf);
+	return (lb->lb_buf);
 }
 
 void
 lbuf_free(struct lbuf *lb)
 {
-	free(lb->buf);
+	free(lb->lb_buf);
 }
 
 void
 lbuf_reset(struct lbuf *lb)
 {
-	lb->pos = -1;
+	lb->lb_pos = -1;
 }
