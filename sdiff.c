@@ -4,7 +4,7 @@
  * This file belongs to the public domain.
  */
 
-#include <sys/types.h>
+#include <sys/param.h>
 #include <sys/wait.h>
 #include <sys/ioctl.h>
 
@@ -21,8 +21,6 @@
 
 #include "lbuf.h"
 #include "pathnames.h"
-
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #define DEFWIDTH 130
 
@@ -44,11 +42,18 @@ int	  getline(FILE *, struct lbuf *);
 int	  readhunk(const char *, struct hunk *);
 int	  startdiff(char **, char **);
 void	  addarg(char ***, size_t *, char *);
-void	  disp(FILE *, struct lbuf *, struct lbuf *, char);
+void	  ask(struct lbuf *, const char *, const char *);
+void	  disp(struct lbuf *, struct lbuf *, char);
+void	  edit(struct lbuf *, const char *, const char *);
+void	  merge(FILE *, struct lbuf *, struct lbuf *);
+void	  save(FILE *, struct lbuf *);
 void	  usage(void) __attribute__((__noreturn__));
 
+FILE	 *tmpfp = NULL;
+char	  prompt[] = "% ";
+char	  tmpfn[MAXPATHLEN];
 char	 *diffprog = _PATH_DIFF;
-char	 *outfile = NULL;
+char	 *outfn = NULL;
 int	  leftcol = 0;
 int	  stripcr = 0;
 int	  suppresscommon = 0;
@@ -91,8 +96,8 @@ int
 main(int argc, char *argv[])
 {
 	char **diffargs, **diffenvp, *s, *p, *t;
+	struct lbuf lbd, lb, lbc, lbl, lbr;
 	int c, fd, status, lna, lnb, i, j;
-	struct lbuf lbd, lb, lbc;
 	FILE *fpd, *outfp;
 	struct hunk h;
 	size_t siz;
@@ -128,7 +133,7 @@ main(int argc, char *argv[])
 			leftcol = 1;
 			break;
 		case 'o':
-			outfile = optarg;
+			outfn = optarg;
 			break;
 		case 'S':
 			stripcr = 1;
@@ -178,10 +183,21 @@ main(int argc, char *argv[])
 	/* Width for each display, excluding gap in middle. */
 	width = (width - 3) / 2;
 
-	if (outfile == NULL)
-		outfp = stdout;
-	else if ((outfp = fopen(outfile, "w")) == NULL)
-		err(2, "fopen %s", outfile);
+	if (outfn != NULL) {
+		char *tmpdir;
+		int tmpfd;
+
+		if ((outfp = fopen(outfn, "w")) == NULL)
+			err(2, "fopen %s", outfn);
+		if ((tmpdir = getenv("TMPDIR")) == NULL)
+			tmpdir = _PATH_TMP;
+		(void)snprintf(tmpfn, sizeof(tmpfn),
+		    "%s/sdiff.XXXXXXXX", tmpdir);
+		if ((tmpfd = mkstemp(tmpfn)) == -1)
+			err(2, "%s", tmpfn);
+		if ((tmpfp = fdopen(tmpfd, "w+")) == NULL)
+			err(2, "fdopen");
+	}
 
 	addarg(&diffargs, &siz, argv[0]);
 	addarg(&diffargs, &siz, argv[1]);
@@ -213,9 +229,11 @@ main(int argc, char *argv[])
 		for (i = 0; i < j; lna++, lnb++, i++) {
 			getline(fpd, &lb);
 			if (leftcol)
-				disp(outfp, &lb, NULL, '(');
+				disp(&lb, NULL, '(');
 			else if (!suppresscommon)
-				disp(outfp, &lb, &lb, ' ');
+				disp(&lb, &lb, ' ');
+			if (outfp != NULL)
+				save(outfp, &lb);
 			LBUF_RESET(lb);
 		}
 		/* Test for EOF. */
@@ -230,7 +248,7 @@ main(int argc, char *argv[])
 				    !getline(fpd, &lb))
 					errx(2, "malformed input: %s",
 					    LBUF_GET(lbd));
-				disp(outfp, NULL, &lb, '>');
+				disp(NULL, &lb, '>');
 				LBUF_RESET(lb);
 			}
 			break;
@@ -275,7 +293,7 @@ main(int argc, char *argv[])
 				if ((t = strchr(s, '\n')) != NULL)
 					*t = '\0';
 				s = t;
-				disp(outfp, &lb, &lbc, '|');
+				disp(&lb, &lbc, '|');
 				LBUF_RESET(lb);
 			}
 			/* Print lines that were deleted. */
@@ -286,7 +304,7 @@ main(int argc, char *argv[])
 				if ((t = strchr(s, '\n')) != NULL)
 					*t = '\0';
 				s = t;
-				disp(outfp, &lbc, NULL, '<');
+				disp(&lbc, NULL, '<');
 			}
 			/* Print lines that were added. */
 			for (; h.h_c <= h.h_d; h.h_c++, lnb++) {
@@ -295,7 +313,7 @@ main(int argc, char *argv[])
 				    !getline(fpd, &lb))
 					errx(2, "malformed input: %s",
 					    LBUF_GET(lbd));
-				disp(outfp, NULL, &lb, '>');
+				disp(NULL, &lb, '>');
 				LBUF_RESET(lb);
 			}
 			LBUF_SET(lbc, p);
@@ -308,11 +326,13 @@ main(int argc, char *argv[])
 				    !getline(fpd, &lb))
 					errx(2, "malformed input: %s",
 					    LBUF_GET(lbd));
-				disp(outfp, &lb, NULL, '<');
+				disp(&lb, NULL, '<');
 				LBUF_RESET(lb);
 			}
 			break;
 		}
+		if (outfp != NULL)
+			merge(outfp, &lbl, &lbr);
 		LBUF_RESET(lbd);
 	}
 	/* Print remaining lines. */
@@ -321,9 +341,9 @@ main(int argc, char *argv[])
 			if (!getline(fpd, &lb))
 				break;
 			if (leftcol)
-				disp(outfp, &lb, NULL, '(');
+				disp(&lb, NULL, '(');
 			else
-				disp(outfp, &lb, &lb, ' ');
+				disp(&lb, &lb, ' ');
 			LBUF_RESET(lb);
 		}
 	(void)fclose(fpd);
@@ -331,8 +351,10 @@ main(int argc, char *argv[])
 	LBUF_FREE(lb);
 	LBUF_FREE(lbc);
 
-	if (outfp != stdout)
+	if (outfp != NULL) {
 		(void)fclose(outfp);
+		(void)unlink(tmpfn);
+	}
 
 	status = 0;
 	(void)wait(&status);
@@ -340,9 +362,9 @@ main(int argc, char *argv[])
 }
 
 void
-disp(FILE *fp, struct lbuf *a, struct lbuf *b, char c)
+disp(struct lbuf *a, struct lbuf *b, char c)
 {
-	(void)fprintf(fp, "%-*.*s %c %-*.*s\n", width, width,
+	(void)printf("%-*.*s %c %-*.*s\n", width, width,
 	    a == NULL ? "" : LBUF_GET(*a), c, width, width,
 	    b == NULL ? "" : LBUF_GET(*b));
 }
@@ -358,6 +380,152 @@ getline(FILE *fp, struct lbuf *lb)
 		LBUF_CHOP(*lb);
 	LBUF_APPEND(*lb, '\0');
 	return (read > 0);
+}
+
+void
+merge(FILE *fp, struct lbuf *l, struct lbuf *r)
+{
+	static struct lbuf lb;
+	static int alloc = 0;
+
+	if (alloc)
+		LBUF_RESET(lb);
+	else
+		LBUF_INIT(lb);
+	ask(&lb, LBUF_GET(*l), LBUF_GET(*r));
+	save(fp, &lb);
+}
+
+void
+ask(struct lbuf *lb, const char *l, const char *r)
+{
+	char buf[10], *cmd;
+
+	for (;;) {
+		(void)printf(prompt);
+		if (fgets(buf, sizeof(buf), stdin) == NULL) {
+			if (feof(stdin))
+				exit(0);
+			else
+				err(2, "fgets");
+		}
+		for (cmd = buf + strlen(buf) - 1;
+		     *cmd == ' ' || *cmd == '\t';
+		     cmd--)
+			*cmd = '\0';
+		for (cmd = buf;
+		     *cmd == ' ' || *cmd == '\t' || *cmd == '\n';
+		     cmd++)
+			;
+		if (strncmp(cmd, "e", 1) == 0) {
+			for (cmd++; *cmd == ' ' || *cmd == '\t'; cmd++)
+				;
+			if (strcmp(cmd, "l") == 0) {
+				edit(lb, l, (const char *)NULL);
+			} else if (strcmp(cmd, "b") == 0) {
+				edit(lb, l, r);
+			} else if (strcmp(cmd, "r") == 0) {
+				edit(lb, (const char *)NULL, r);
+			} else if (strcmp(cmd, "") == 0) {
+				edit(lb, (const char *)NULL,
+				    (const char *)NULL);
+			}
+		} else if (strcmp(cmd, "l") == 0) {
+			for (; *l != '\0'; l++)
+				LBUF_APPEND(*lb, *l);
+			LBUF_APPEND(*lb, '\0');
+		} else if (strcmp(cmd, "q") == 0) {
+			exit(0);
+		} else if (strcmp(cmd, "r") == 0) {
+			for (; *r != '\0'; r++)
+				LBUF_APPEND(*lb, *r);
+			LBUF_APPEND(*lb, '\0');
+		} else if (strcmp(cmd, "s") == 0) {
+			suppresscommon = 1;
+		} else if (strcmp(cmd, "v") == 0) {
+			suppresscommon = 0;
+		}
+		if (strcmp(cmd, "") != 0)
+			(void)printf("%s: unknown command\n"
+			    "Supported commands:\n"
+			    "  e	Edit a blank line\n"
+			    "  eb	Edit both displays\n"
+			    "  el	Edit the left display\n"
+			    "  er	Edit the right display\n"
+			    "  l	Merge the left display\n"
+			    "  q	Quit\n"
+			    "  r	Merge the right display\n"
+			    "  s	Enable silent mode\n"
+			    "  v	Enable verbose mode\n", buf);
+	}
+}
+
+void
+edit(struct lbuf *lb, const char *l, const char *r)
+{
+	static char *cmd = NULL;
+	int status;
+
+	if (cmd == NULL) {
+		const char *editor, *s;
+		size_t siz;
+		char *p;
+
+		if ((editor = getenv("EDITOR")) == NULL)
+			editor = _PATH_VI;
+		/*
+		 * 1	argument spacing
+		 * 2	quoting the editor
+		 * 2	quoting the temporary filename
+		 * 1	NUL-termination
+		 * ===================================
+		 * 6	total
+		 */
+		siz = strlen(editor) + 6 + strlen(tmpfn);
+		for (s = editor; *s != '\0'; s++)
+			if (strpbrk(s, "\\'"))
+				siz++;
+		for (s = tmpfn; *s != '\0'; s++)
+			if (strpbrk(s, "\\'"))
+				siz++;
+		if ((cmd = malloc(siz)) == NULL)
+			err(2, NULL);
+		p = cmd;
+		*p++ = '\'';
+		for (s = editor; *s != '\0'; s++, p++) {
+			if (strchr("\\'", *s) != NULL)
+				*p++ = '\\';
+			*p = *s;
+		}
+		*p++ = '\'';
+		*p++ = ' ';
+		*p++ = '\'';
+		for (s = tmpfn; *s != '\0'; s++, p++) {
+			if (strchr("\\'", *s) != NULL)
+				*p++ = '\\';
+			*p = *s;
+		}
+		*p++ = '\'';
+		*p = '\0';
+	}
+
+	if (ftruncate(fileno(tmpfp), 0) == -1)
+		err(2, "ftruncate");
+	fpurge(tmpfp);
+	if (l != NULL)
+		if (fwrite(l, 1, strlen(l), tmpfp) != strlen(l))
+			err(2, "fwrite");
+	if (l != NULL && r != NULL)
+		if (fwrite("\n", 1, 1, tmpfp) != 1)
+			err(2, "fwrite");
+	if (r != NULL)
+		if (fwrite(r, 1, strlen(r), tmpfp) != strlen(r))
+			err(2, "fwrite");
+	status = system(cmd);
+	if (!WIFEXITED(status))
+		err(2, "%s", cmd);
+//	if ()
+//	LBUF_CAT();
 }
 
 #define ST_BEG  1	/* beginning */
@@ -483,6 +651,15 @@ check:
 		break;
 	}
 	return (1);
+}
+
+void
+save(FILE *fp, struct lbuf *lb)
+{
+	size_t siz = LBUF_LEN(*lb);
+
+	if (fwrite(LBUF_GET(*lb), 1, siz, fp) != siz)
+		err(2, "fwrite");
 }
 
 char **
