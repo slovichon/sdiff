@@ -120,3 +120,13 @@ above.
 .Sh SEE ALSO
 .Xr diff 1 ,
 .Xr re_format 7 
+.Sh BUGS
+Because
+.Nm
+does not run at the same exact time as the
+.Xr diff 1
+process it invokes, the files may not be the same when
+.Nm
+compares them.
+This means that the output may be wrong if another process is changing
+the data in the files.
