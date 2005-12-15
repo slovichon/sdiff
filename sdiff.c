@@ -14,15 +14,17 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <limits.h>
+#include <paths.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "lbuf.h"
-#include "pathnames.h"
 
 #define DEFWIDTH 130
+
+#define _PATH_DIFF	"/usr/bin/diff"
 
 /* Hunk types. */
 #define HT_DEL 1
@@ -40,14 +42,14 @@ struct hunk {
 char	**buildenvp(void);
 int	  getline(FILE *, struct lbuf *);
 int	  readhunk(const char *, struct hunk *);
-int	  startdiff(char **, char **);
+int	  startdiff(char **);
 void	  addarg(char ***, size_t *, char *);
 void	  ask(struct lbuf *, const char *, const char *);
 void	  disp(struct lbuf *, struct lbuf *, char);
 void	  edit(struct lbuf *, const char *, const char *);
 void	  merge(FILE *, struct lbuf *, struct lbuf *);
 void	  save(FILE *, struct lbuf *);
-void	  usage(void) __attribute__((__noreturn__));
+void	  usage(void);
 
 FILE	 *tmpfp = NULL;
 char	  prompt[] = "% ";
@@ -58,11 +60,6 @@ int	  leftcol = 0;
 int	  stripcr = 0;
 int	  suppresscommon = 0;
 int	  width = 0;
-
-char *passenv[] = {
-	"TMPDIR",
-	NULL
-};
 
 struct option lopts[] = {
 	{ "text",			no_argument,		NULL, 'a' },
@@ -208,10 +205,8 @@ main(int argc, char *argv[])
 	else
 		diffargs[0]++;
 
-	diffenvp = buildenvp();
-	fd = startdiff(diffargs, diffenvp);
+	fd = startdiff(diffargs);
 	free(diffargs);
-	free(diffenvp);
 
 	if ((fpd = fdopen(fd, "r")) == NULL)
 		err(2, "fdopen %s", diffprog);
@@ -550,10 +545,7 @@ readhunk(const char *s, struct hunk *h)
 
 	state = ST_BEG;
 	for (p = s; *p != '\0'; p++) {
-		switch (*p) {
-		case '0': case '1': case '2': case '3':
-		case '4': case '5': case '6': case '7':
-		case '8': case '9':
+		if (isdigit(*p)) {
 			i = 0;
 			while (isdigit(*p))
 				i = (i * 10) + (*p++ - '0');
@@ -578,7 +570,9 @@ readhunk(const char *s, struct hunk *h)
 				return (0);
 			}
 			p--;
-			break;
+			continue;
+		}
+		switch (*p) {
 		case 'a':
 		case 'd':
 		case 'c':
@@ -662,39 +656,8 @@ save(FILE *fp, struct lbuf *lb)
 		err(2, "fwrite");
 }
 
-char **
-buildenvp(void)
-{
-	char **ep, **fp, **envp;
-	extern char **environ;
-	size_t siz;
-	int i;
-
-	/* Save one for terminating NULL. */
-	siz = 1;
-	for (fp = passenv; *fp != NULL; fp++)
-		for (ep = environ; *ep != NULL; ep++)
-			if (strncmp(*ep, *fp, strlen(*fp)) == 0 &&
-			    (*ep)[strlen(*fp)] == '=') {
-				siz++;
-				break;
-			}
-	if ((envp = calloc(siz, sizeof(*envp))) == NULL)
-		err(2, "calloc");
-	i = 0;
-	for (fp = passenv; *fp != NULL; fp++)
-		for (ep = environ; *ep != NULL; ep++)
-			if (strncmp(*ep, *fp, strlen(*fp)) == 0 &&
-			    (*ep)[strlen(*fp)] == '=') {
-				envp[i++] = *ep;
-				break;
-			}
-	envp[i] = NULL;
-	return (envp);
-}
-
 int
-startdiff(char **argv, char **envp)
+startdiff(char **argv)
 {
 	int fd[2];
 
@@ -712,7 +675,7 @@ startdiff(char **argv, char **envp)
 		if (dup(fd[1]) == -1)
 			err(2, "dup <pipe>");
 		(void)close(fd[1]);
-		(void)execve(diffprog, argv, envp);
+		(void)execv(diffprog, argv);
 		err(2, "execve");
 		/* NOTREACHED */
 	}
