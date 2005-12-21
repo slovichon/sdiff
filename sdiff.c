@@ -1,7 +1,7 @@
 /* $Id$ */
 /*
- * Written by Jared Yanovich
- * This file belongs to the public domain.
+ * Written by Jared Yanovich <jaredy@openbsd.org>
+ * Public domain
  */
 
 #include <sys/param.h>
@@ -39,27 +39,28 @@ struct hunk {
 	int h_d;	/* file b end */
 };
 
-char	**buildenvp(void);
-int	  getline(FILE *, struct lbuf *);
-int	  readhunk(const char *, struct hunk *);
-int	  startdiff(char **);
-void	  addarg(char ***, size_t *, char *);
-void	  ask(struct lbuf *, const char *, const char *);
-void	  disp(struct lbuf *, struct lbuf *, char);
-void	  edit(struct lbuf *, const char *, const char *);
-void	  merge(FILE *, struct lbuf *, struct lbuf *);
-void	  save(FILE *, struct lbuf *);
-void	  usage(void);
+int	 getline(FILE *, struct lbuf *);
+int	 readhunk(const char *, struct hunk *);
+int	 startdiff(char **);
+void	 addarg(char ***, size_t *, char *);
+void	 ask(struct lbuf *, const char *, const char *);
+void	 disp(struct lbuf *, struct lbuf *, char);
+void	 edit(struct lbuf *, const char *, const char *);
+void	 merge(FILE *, struct lbuf *, struct lbuf *);
+void	 save(FILE *, struct lbuf *);
+void	 sdiff(int);
+void	 usage(void);
 
-FILE	 *tmpfp = NULL;
-char	  prompt[] = "% ";
-char	  tmpfn[MAXPATHLEN];
-char	 *diffprog = _PATH_DIFF;
-char	 *outfn = NULL;
-int	  leftcol = 0;
-int	  stripcr = 0;
-int	  suppresscommon = 0;
-int	  width = 0;
+FILE	*tmpfp = NULL;
+char	 prompt[] = "% ";
+char	 tmpfn[MAXPATHLEN];
+char	*diffprog = _PATH_DIFF;
+char	*outfn = NULL;
+FILE	*outfp;
+int	 leftcol = 0;
+int	 stripcr = 0;
+int	 suppresscommon = 0;
+int	 width = 0;
 
 struct option lopts[] = {
 	{ "text",			no_argument,		NULL, 'a' },
@@ -92,19 +93,17 @@ addarg(char ***s, size_t *siz, char *p)
 int
 main(int argc, char *argv[])
 {
-	char **diffargs, **diffenvp, *s, *p, *t;
-	struct lbuf lbd, lb, lbc, lbl, lbr;
-	int c, fd, status, lna, lnb, i, j;
-	FILE *fpd, *outfp;
-	struct hunk h;
+	int c, fd, status;
+	char **diffargs;
 	size_t siz;
 	long l;
 
 	diffargs = NULL;
+	outfp = NULL;
 	siz = 0;
 	/* Placeholder for program name. */
 	addarg(&diffargs, &siz, NULL);
-	addarg(&diffargs, &siz, "--sdiff-merge-assist");
+	addarg(&diffargs, &siz, "--full");
 	while ((c = getopt_long(argc, argv, "abdI:ilo:stWw:", lopts,
 	    NULL)) != -1) {
 		switch (c) {
@@ -198,7 +197,7 @@ main(int argc, char *argv[])
 
 	addarg(&diffargs, &siz, argv[0]);
 	addarg(&diffargs, &siz, argv[1]);
-	addarg(&diffargs, &siz, (char *)NULL);
+	addarg(&diffargs, &siz, NULL);
 
 	if ((diffargs[0] = strrchr(diffprog, '/')) == NULL)
 		diffargs[0] = diffprog;
@@ -208,29 +207,56 @@ main(int argc, char *argv[])
 	fd = startdiff(diffargs);
 	free(diffargs);
 
+	sdiff(fd);
+
+	if (wait(&status) == -1)
+		err(2, "wait");
+	exit(WEXITSTATUS(status));
+}
+
+void
+sdiff(int fd)
+{
+	struct lbuf lbd, lb, lbc, lbl, lbr;
+	int lna, lnb, i, j, c;
+	char *s, *p, *t;
+	struct hunk h;
+	FILE *fpd;
+
 	if ((fpd = fdopen(fd, "r")) == NULL)
 		err(2, "fdopen %s", diffprog);
-	lna = lnb = 0;
+	lna = lnb = 1;
 	LBUF_INIT(lbd);
 	LBUF_INIT(lb);
 	LBUF_INIT(lbc);
 	while (getline(fpd, &lbd)) {
-		if (!readhunk(LBUF_GET(lbd), &h))
-			errx(2, "malformed input: %s",
-			    LBUF_GET(lbd));
-		j = MIN(h.h_c - lnb, h.h_a - lna);
-		if (h.h_type == HT_CHG)
-			j--;
-		for (i = 0; i < j; lna++, lnb++, i++) {
-			getline(fpd, &lb);
+		/* Pass through any number of common lines. */
+		s = LBUF_GET(lbd);
+		if (s[0] == '=' && s[1] == ' ') {
+			LBUF_SET(lbd, s + 2);
 			if (leftcol)
-				disp(&lb, NULL, '(');
+				disp(&lbd, NULL, '(');
 			else if (!suppresscommon)
-				disp(&lb, &lb, ' ');
+				disp(&lbd, &lbd, ' ');
 			if (outfp != NULL)
-				save(outfp, &lb);
-			LBUF_RESET(lb);
+				save(outfp, &lbd);
+			LBUF_SET(lbd, s);
+			LBUF_RESET(lbd);
+			lna++;
+			lnb++;
+			continue;
 		}
+
+		if (!readhunk(LBUF_GET(lbd), &h))
+			errx(2, "malformed hunk header: %s",
+			    LBUF_GET(lbd));
+		if (h.h_type == HT_ADD)
+			h.h_a++;
+		else if (h.h_type == HT_DEL)
+			h.h_c++;
+		if (h.h_a != lna || h.h_c != lnb)
+			errx(2, "bad hunk header: %s", LBUF_GET(lbd));
+
 		/* Test for EOF. */
 		if ((c = fgetc(fpd)) == EOF && h.h_type == HT_ADD)
 			break;
@@ -241,20 +267,20 @@ main(int argc, char *argv[])
 				if (fgetc(fpd) != '>' ||
 				    fgetc(fpd) != ' ' ||
 				    !getline(fpd, &lb))
-					errx(2, "malformed input: %s",
-					    LBUF_GET(lbd));
+					errx(2, "malformed hunk (%s): %s",
+					    LBUF_GET(lbd), LBUF_GET(lb));
 				disp(NULL, &lb, '>');
 				LBUF_RESET(lb);
 			}
 			break;
 		case HT_CHG:
 			/* Can't seek on a pipe; read it all in. */
-			for (i = 0; i < h.h_b - h.h_a; i++) {
+			for (i = 0; i <= h.h_b - h.h_a; i++) {
 				if (fgetc(fpd) != '<' ||
 				    fgetc(fpd) != ' ' ||
 				    !getline(fpd, &lbc))
-					errx(2, "malformed input: %s",
-					    LBUF_GET(lbd));
+					errx(2, "malformed hunk (%s): %s",
+					    LBUF_GET(lbd), LBUF_GET(lbc));
 				LBUF_CHOP(lbc);
 				LBUF_APPEND(lbc, '\n');
 			}
@@ -267,10 +293,11 @@ main(int argc, char *argv[])
 			p = s = LBUF_GET(lbc);
 
 			/* Read the dummy `---' line. */
-			if (!getline(fpd, &lb) || strcmp(LBUF_GET(lb),
-			    "---\n") != 0)
-				errx(2, "malformed input: %s",
-				    LBUF_GET(lbd));
+			if (!getline(fpd, &lb) ||
+			    strcmp(LBUF_GET(lb), "---") != 0)
+				errx(2, "malformed hunk (%s): %s",
+				    LBUF_GET(lbd), LBUF_GET(lb));
+			LBUF_RESET(lb);
 
 			/* Print lines that were changed. */
 			j = MIN(h.h_b - h.h_a, h.h_d - h.h_c);
@@ -283,22 +310,26 @@ main(int argc, char *argv[])
 				if (fgetc(fpd) != '>' ||
 				    fgetc(fpd) != ' ' ||
 				    !getline(fpd, &lb) || s == NULL)
-					errx(2, "malformed input: %s",
+					errx(2, "malformed hunk (%s): %s",
+					    LBUF_GET(lbd), LBUF_GET(lb));
+
+				if (s == NULL)
+					errx(2, "short change hunk (%s)",
 					    LBUF_GET(lbd));
-				if ((t = strchr(s, '\n')) != NULL)
-					*t = '\0';
-				s = t;
-				disp(&lb, &lbc, '|');
+				LBUF_SET(lbc, s);
+				if ((s = strchr(s, '\n')) != NULL)
+					*s++ = '\0';
+				disp(&lbc, &lb, '|');
 				LBUF_RESET(lb);
 			}
 			/* Print lines that were deleted. */
 			for (; h.h_a <= h.h_b; h.h_a++, lna++) {
 				if (s == NULL)
-					errx(2, "malformed input: %s",
+					errx(2, "short change hunk (%s)",
 					    LBUF_GET(lbd));
-				if ((t = strchr(s, '\n')) != NULL)
-					*t = '\0';
-				s = t;
+				LBUF_SET(lbc, s);
+				if ((s = strchr(s, '\n')) != NULL)
+					*s++ = '\0';
 				disp(&lbc, NULL, '<');
 			}
 			/* Print lines that were added. */
@@ -306,8 +337,8 @@ main(int argc, char *argv[])
 				if (fgetc(fpd) != '>' ||
 				    fgetc(fpd) != ' ' ||
 				    !getline(fpd, &lb))
-					errx(2, "malformed input: %s",
-					    LBUF_GET(lbd));
+					errx(2, "malformed hunk (%s): %s",
+					    LBUF_GET(lbd), LBUF_GET(lb));
 				disp(NULL, &lb, '>');
 				LBUF_RESET(lb);
 			}
@@ -319,8 +350,8 @@ main(int argc, char *argv[])
 				if (fgetc(fpd) != '<' ||
 				    fgetc(fpd) != ' ' ||
 				    !getline(fpd, &lb))
-					errx(2, "malformed input: %s",
-					    LBUF_GET(lbd));
+					errx(2, "malformed hunk (%s): %s",
+					    LBUF_GET(lbd), LBUF_GET(lb));
 				disp(&lb, NULL, '<');
 				LBUF_RESET(lb);
 			}
@@ -350,10 +381,6 @@ main(int argc, char *argv[])
 		(void)fclose(outfp);
 		(void)unlink(tmpfn);
 	}
-
-	status = 0;
-	(void)wait(&status);
-	exit(WEXITSTATUS(status));
 }
 
 void
@@ -370,7 +397,7 @@ getline(FILE *fp, struct lbuf *lb)
 	int c, read;
 
 	for (read = 0; (c = fgetc(fp)) != EOF && c != '\n'; read++)
-		LBUF_APPEND(*lb, (char)c);
+		LBUF_APPEND(*lb, c);
 	if (stripcr && lb->lb_buf[lb->lb_pos - 1] == '\r')
 		LBUF_CHOP(*lb);
 	LBUF_APPEND(*lb, '\0');
@@ -416,14 +443,13 @@ ask(struct lbuf *lb, const char *l, const char *r)
 			for (cmd++; *cmd == ' ' || *cmd == '\t'; cmd++)
 				;
 			if (strcmp(cmd, "l") == 0) {
-				edit(lb, l, (const char *)NULL);
+				edit(lb, l, NULL);
 			} else if (strcmp(cmd, "b") == 0) {
 				edit(lb, l, r);
 			} else if (strcmp(cmd, "r") == 0) {
-				edit(lb, (const char *)NULL, r);
+				edit(lb, NULL, r);
 			} else if (strcmp(cmd, "") == 0) {
-				edit(lb, (const char *)NULL,
-				    (const char *)NULL);
+				edit(lb, NULL, NULL);
 			}
 		} else if (strcmp(cmd, "l") == 0) {
 			for (; *l != '\0'; l++)
@@ -600,6 +626,8 @@ readhunk(const char *s, struct hunk *h)
 			else
 				state = ST_COM2;
 			break;
+		case '\n':
+			goto check;
 		default:
 			return (0);
 		}
