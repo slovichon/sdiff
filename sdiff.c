@@ -5,8 +5,8 @@
  */
 
 #include <sys/param.h>
-#include <sys/wait.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 
 #include <ctype.h>
 #include <err.h>
@@ -15,6 +15,7 @@
 #include <getopt.h>
 #include <limits.h>
 #include <paths.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,7 +40,7 @@ struct hunk {
 	int h_d;	/* file b end */
 };
 
-int	 getline(FILE *, struct lbuf *);
+int	 appendline(FILE *, struct lbuf *);
 int	 readhunk(const char *, struct hunk *);
 int	 startdiff(char **);
 void	 addarg(char ***, size_t *, char *);
@@ -217,9 +218,10 @@ main(int argc, char *argv[])
 void
 sdiff(int fd)
 {
-	struct lbuf lbd, lb, lbc, lbl, lbr;
+	struct lbuf lbd, lbl, lbr;
+	char *st_l, *st_r, *cur_l;
+	ptrdiff_t off_l, off_r;
 	int lna, lnb, i, j, c;
-	char *s, *p, *t;
 	struct hunk h;
 	FILE *fpd;
 
@@ -227,20 +229,26 @@ sdiff(int fd)
 		err(2, "fdopen %s", diffprog);
 	lna = lnb = 1;
 	LBUF_INIT(lbd);
-	LBUF_INIT(lb);
-	LBUF_INIT(lbc);
-	while (getline(fpd, &lbd)) {
+	LBUF_INIT(lbl);
+	LBUF_INIT(lbr);
+	while (appendline(fpd, &lbd)) {
 		/* Pass through any number of common lines. */
-		s = LBUF_GET(lbd);
-		if (s[0] == '=' && s[1] == ' ') {
-			LBUF_SET(lbd, s + 2);
+		st_l = LBUF_GET(lbd);
+		if (st_l[0] == '=' && st_l[1] == ' ') {
+			LBUF_SET(lbd, st_l + 2);
 			if (leftcol)
 				disp(&lbd, NULL, '(');
 			else if (!suppresscommon)
 				disp(&lbd, &lbd, ' ');
+			LBUF_SET(lbd, st_l);
+
+			LBUF_CHOP(lbd);
+			LBUF_APPEND(lbd, '\n');
+			LBUF_APPEND(lbd, '\0');
+			LBUF_SET(lbd, st_l + 2);
 			if (outfp != NULL)
 				save(outfp, &lbd);
-			LBUF_SET(lbd, s);
+			LBUF_SET(lbd, st_l);
 			LBUF_RESET(lbd);
 			lna++;
 			lnb++;
@@ -264,118 +272,154 @@ sdiff(int fd)
 		switch (h.h_type) {
 		case HT_ADD:
 			for (; h.h_c <= h.h_d; h.h_c++, lnb++) {
+				off_r = LBUF_LEN(lbr);
+
 				if (fgetc(fpd) != '>' ||
 				    fgetc(fpd) != ' ' ||
-				    !getline(fpd, &lb))
+				    !appendline(fpd, &lbr))
 					errx(2, "malformed hunk (%s): %s",
-					    LBUF_GET(lbd), LBUF_GET(lb));
-				disp(NULL, &lb, '>');
-				LBUF_RESET(lb);
+					    LBUF_GET(lbd), LBUF_GET(lbr));
+
+				st_r = LBUF_GET(lbr);
+				LBUF_SET(lbr, st_r + off_r);
+				disp(NULL, &lbr, '>');
+				LBUF_SET(lbr, st_r);
+
+				LBUF_CHOP(lbr);
+				LBUF_APPEND(lbr, '\n');
 			}
+			LBUF_APPEND(lbr, '\0');
 			break;
 		case HT_CHG:
 			/* Can't seek on a pipe; read it all in. */
 			for (i = 0; i <= h.h_b - h.h_a; i++) {
 				if (fgetc(fpd) != '<' ||
 				    fgetc(fpd) != ' ' ||
-				    !getline(fpd, &lbc))
+				    !appendline(fpd, &lbl))
 					errx(2, "malformed hunk (%s): %s",
-					    LBUF_GET(lbd), LBUF_GET(lbc));
-				LBUF_CHOP(lbc);
-				LBUF_APPEND(lbc, '\n');
+					    LBUF_GET(lbd), LBUF_GET(lbl));
+				LBUF_CHOP(lbl);
+				LBUF_APPEND(lbl, '\n');
 			}
-			LBUF_APPEND(lbc, '\0');
-			/*
-			 * `p' is the original pointer.
-			 * `s' points to the current line.
-			 * `t' (later) points to the next line.
-			 */
-			p = s = LBUF_GET(lbc);
+			LBUF_APPEND(lbl, '\0');
+
+			st_l = cur_l = LBUF_GET(lbl);
+			off_l = LBUF_LEN(lbl);
 
 			/* Read the dummy `---' line. */
-			if (!getline(fpd, &lb) ||
-			    strcmp(LBUF_GET(lb), "---") != 0)
-				errx(2, "malformed hunk (%s): %s",
-				    LBUF_GET(lbd), LBUF_GET(lb));
-			LBUF_RESET(lb);
-
+			if (fgetc(fpd) != '-' ||
+			    fgetc(fpd) != '-' ||
+			    fgetc(fpd) != '-' ||
+			    fgetc(fpd) != '\n')
+				errx(2, "malformed change hunk (%s)",
+				    LBUF_GET(lbd));
 			/* Print lines that were changed. */
 			j = MIN(h.h_b - h.h_a, h.h_d - h.h_c);
 			for (i = 0; i <= j;
 			     i++, h.h_a++, h.h_c++, lna++, lnb++) {
+				off_r = LBUF_LEN(lbr);
+
 				/*
 				 * By definition (i.e., MIN(), above),
 				 * this _should_ return content.
 				 */
 				if (fgetc(fpd) != '>' ||
 				    fgetc(fpd) != ' ' ||
-				    !getline(fpd, &lb) || s == NULL)
+				    !appendline(fpd, &lbr) || cur_l == NULL)
 					errx(2, "malformed hunk (%s): %s",
-					    LBUF_GET(lbd), LBUF_GET(lb));
+					    LBUF_GET(lbd), LBUF_GET(lbr));
 
-				if (s == NULL)
-					errx(2, "short change hunk (%s)",
-					    LBUF_GET(lbd));
-				LBUF_SET(lbc, s);
-				if ((s = strchr(s, '\n')) != NULL)
-					*s++ = '\0';
-				disp(&lbc, &lb, '|');
-				LBUF_RESET(lb);
+				LBUF_SET(lbl, cur_l);
+				if ((cur_l = strchr(cur_l, '\n')) != NULL)
+					*cur_l = '\0';
+
+				st_r = LBUF_GET(lbr);
+				LBUF_SET(lbr, st_r + off_r);
+				disp(&lbl, &lbr, '|');
+				LBUF_SET(lbr, st_r);
+
+				if (cur_l)
+					*cur_l++ = '\n';
+
+				LBUF_CHOP(lbr);
+				LBUF_APPEND(lbr, '\n');
 			}
 			/* Print lines that were deleted. */
 			for (; h.h_a <= h.h_b; h.h_a++, lna++) {
-				if (s == NULL)
+				if (cur_l == NULL)
 					errx(2, "short change hunk (%s)",
 					    LBUF_GET(lbd));
-				LBUF_SET(lbc, s);
-				if ((s = strchr(s, '\n')) != NULL)
-					*s++ = '\0';
-				disp(&lbc, NULL, '<');
+
+				LBUF_SET(lbl, cur_l);
+				if ((cur_l = strchr(cur_l, '\n')) != NULL)
+					*cur_l = '\0';
+				disp(&lbl, NULL, '<');
+				if (cur_l)
+					*cur_l++ = '\n';
 			}
+			LBUF_SET(lbl, st_l);
 			/* Print lines that were added. */
 			for (; h.h_c <= h.h_d; h.h_c++, lnb++) {
+				off_r = LBUF_LEN(lbr);
+
 				if (fgetc(fpd) != '>' ||
 				    fgetc(fpd) != ' ' ||
-				    !getline(fpd, &lb))
+				    !appendline(fpd, &lbr))
 					errx(2, "malformed hunk (%s): %s",
-					    LBUF_GET(lbd), LBUF_GET(lb));
-				disp(NULL, &lb, '>');
-				LBUF_RESET(lb);
+					    LBUF_GET(lbd), LBUF_GET(lbr));
+
+				st_r = LBUF_GET(lbr);
+				LBUF_SET(lbr, st_r + off_r);
+				disp(NULL, &lbr, '>');
+				LBUF_SET(lbr, st_r);
+
+				LBUF_CHOP(lbr);
+				LBUF_APPEND(lbr, '\n');
 			}
-			LBUF_SET(lbc, p);
-			LBUF_RESET(lbc);
+			LBUF_APPEND(lbr, '\0');
 			break;
 		case HT_DEL:
 			for (; h.h_a <= h.h_b; h.h_a++, lna++) {
+				off_l = LBUF_LEN(lbl);
+
 				if (fgetc(fpd) != '<' ||
 				    fgetc(fpd) != ' ' ||
-				    !getline(fpd, &lb))
+				    !appendline(fpd, &lbl))
 					errx(2, "malformed hunk (%s): %s",
-					    LBUF_GET(lbd), LBUF_GET(lb));
-				disp(&lb, NULL, '<');
-				LBUF_RESET(lb);
+					    LBUF_GET(lbd), LBUF_GET(lbl));
+
+				st_l = LBUF_GET(lbl);
+				LBUF_SET(lbl, st_l + off_l);
+				disp(&lbl, NULL, '<');
+				LBUF_SET(lbl, st_l);
+
+				LBUF_CHOP(lbl);
+				LBUF_APPEND(lbl, '\n');
 			}
+			LBUF_APPEND(lbl, '\0');
 			break;
 		}
 		if (outfp != NULL)
 			merge(outfp, &lbl, &lbr);
 		LBUF_RESET(lbd);
+		LBUF_RESET(lbl);
+		LBUF_RESET(lbr);
 	}
 	/* Print remaining lines. */
 	if (leftcol || !suppresscommon)
 		for (;;) {
-			if (!getline(fpd, &lb))
+			if (!appendline(fpd, &lbl))
 				break;
 			if (leftcol)
-				disp(&lb, NULL, '(');
+				disp(&lbl, NULL, '(');
 			else
-				disp(&lb, &lb, ' ');
-			LBUF_RESET(lb);
+				disp(&lbl, &lbl, ' ');
+			LBUF_RESET(lbl);
 		}
 	(void)fclose(fpd);
 	LBUF_FREE(lbd);
-	LBUF_FREE(lb);
-	LBUF_FREE(lbc);
+	LBUF_FREE(lbl);
+	LBUF_FREE(lbr);
 
 	if (outfp != NULL) {
 		(void)fclose(outfp);
@@ -392,7 +436,7 @@ disp(struct lbuf *a, struct lbuf *b, char c)
 }
 
 int
-getline(FILE *fp, struct lbuf *lb)
+appendline(FILE *fp, struct lbuf *lb)
 {
 	int c, read;
 
@@ -422,62 +466,91 @@ void
 ask(struct lbuf *lb, const char *l, const char *r)
 {
 	char buf[10], *cmd;
+	int done;
 
-	for (;;) {
-		(void)printf(prompt);
+	done = 0;
+	while (!done) {
+		(void)printf("%s", prompt);
+		(void)fflush(stdout);
 		if (fgets(buf, sizeof(buf), stdin) == NULL) {
-			if (feof(stdin))
+			if (feof(stdin)) {
+				(void)printf("\n");
+				fclose(outfp);
 				exit(0);
-			else
+			} else
 				err(2, "fgets");
 		}
+		/* Trim trailing/beginning space. */
 		for (cmd = buf + strlen(buf) - 1;
-		     *cmd == ' ' || *cmd == '\t';
-		     cmd--)
+		    cmd > buf && isspace(*cmd); cmd--)
 			*cmd = '\0';
-		for (cmd = buf;
-		     *cmd == ' ' || *cmd == '\t' || *cmd == '\n';
-		     cmd++)
+		for (cmd = buf; isspace(*cmd); cmd++)
 			;
-		if (strncmp(cmd, "e", 1) == 0) {
-			for (cmd++; *cmd == ' ' || *cmd == '\t'; cmd++)
+		switch (*cmd) {
+		case 'e':
+			while (isspace(*++cmd))
 				;
-			if (strcmp(cmd, "l") == 0) {
+			done = 1;
+			switch (*cmd) {
+			case 'l':
 				edit(lb, l, NULL);
-			} else if (strcmp(cmd, "b") == 0) {
+				break;
+			case 'b':
 				edit(lb, l, r);
-			} else if (strcmp(cmd, "r") == 0) {
+				break;
+			case 'r':
 				edit(lb, NULL, r);
-			} else if (strcmp(cmd, "") == 0) {
+				break;
+			case '\0':
 				edit(lb, NULL, NULL);
+				break;
+			default:
+				done = 0;
+				warnx("unknown edit modifier");
+				break;
 			}
-		} else if (strcmp(cmd, "l") == 0) {
-			for (; *l != '\0'; l++)
+			break;
+		case 'l':
+			for (; l != NULL && *l != '\0'; l++)
 				LBUF_APPEND(*lb, *l);
 			LBUF_APPEND(*lb, '\0');
-		} else if (strcmp(cmd, "q") == 0) {
+			done = 1;
+			break;
+		case 'q':
+			(void)fclose(outfp);
 			exit(0);
-		} else if (strcmp(cmd, "r") == 0) {
-			for (; *r != '\0'; r++)
+			/* NOTREACHED */
+		case 'r':
+			for (; r != NULL && *r != '\0'; r++)
 				LBUF_APPEND(*lb, *r);
 			LBUF_APPEND(*lb, '\0');
-		} else if (strcmp(cmd, "s") == 0) {
+			done = 1;
+			break;
+		case 's':
 			suppresscommon = 1;
-		} else if (strcmp(cmd, "v") == 0) {
-			suppresscommon = 0;
+			break;
+		case 'v':
+			suppresscommon = 1;
+			break;
+		default:
+			if (strcmp(cmd, "") != 0)
+				(void)printf("%s: unknown command\n"
+				    "Supported commands:\n"
+				    "  e	Edit a blank line\n"
+				    "  eb	Edit both displays\n"
+				    "  el	Edit the left display\n"
+				    "  er	Edit the right display\n"
+				    "  l	Merge the left display\n"
+				    "  q	Quit\n"
+				    "  r	Merge the right display\n"
+				    "  s	Enable silent mode\n"
+				    "  v	Enable verbose mode\n", buf);
+			break;
 		}
-		if (strcmp(cmd, "") != 0)
-			(void)printf("%s: unknown command\n"
-			    "Supported commands:\n"
-			    "  e	Edit a blank line\n"
-			    "  eb	Edit both displays\n"
-			    "  el	Edit the left display\n"
-			    "  er	Edit the right display\n"
-			    "  l	Merge the left display\n"
-			    "  q	Quit\n"
-			    "  r	Merge the right display\n"
-			    "  s	Enable silent mode\n"
-			    "  v	Enable verbose mode\n", buf);
+#if 0
+		if (*cmd != '\0' && *++cmd != '\0')
+			warnx("junk at end of input");
+#endif
 	}
 }
 
@@ -678,10 +751,8 @@ check:
 void
 save(FILE *fp, struct lbuf *lb)
 {
-	size_t siz = LBUF_LEN(*lb);
-
-	if (fwrite(LBUF_GET(*lb), 1, siz, fp) != siz)
-		err(2, "fwrite");
+	if (fprintf(fp, "%s", LBUF_GET(*lb)) == -1)
+		err(2, "fprintf");
 }
 
 int
@@ -708,7 +779,7 @@ startdiff(char **argv)
 		/* NOTREACHED */
 	}
 	(void)close(fd[1]);
-	(void)close(STDIN_FILENO);
+//	(void)close(STDIN_FILENO);
 	return (fd[0]);
 }
 
