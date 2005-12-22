@@ -15,6 +15,7 @@
 #include <getopt.h>
 #include <limits.h>
 #include <paths.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -181,19 +182,11 @@ main(int argc, char *argv[])
 	width = (width - 3) / 2;
 
 	if (outfn != NULL) {
-		char *tmpdir;
-		int tmpfd;
-
+		if (strcmp(argv[0], "-") == 0 ||
+		    strcmp(argv[1], "-") == 0)
+			errx(2, "cannot interactively merge standard input");
 		if ((outfp = fopen(outfn, "w")) == NULL)
 			err(2, "fopen %s", outfn);
-		if ((tmpdir = getenv("TMPDIR")) == NULL)
-			tmpdir = _PATH_TMP;
-		(void)snprintf(tmpfn, sizeof(tmpfn),
-		    "%s/sdiff.XXXXXXXX", tmpdir);
-		if ((tmpfd = mkstemp(tmpfn)) == -1)
-			err(2, "%s", tmpfn);
-		if ((tmpfp = fdopen(tmpfd, "w+")) == NULL)
-			err(2, "fdopen");
 	}
 
 	addarg(&diffargs, &siz, argv[0]);
@@ -316,7 +309,7 @@ sdiff(int fd)
 			/* Print lines that were changed. */
 			j = MIN(h.h_b - h.h_a, h.h_d - h.h_c);
 			for (i = 0; i <= j;
-			     i++, h.h_a++, h.h_c++, lna++, lnb++) {
+			    i++, h.h_a++, h.h_c++, lna++, lnb++) {
 				off_r = LBUF_LEN(lbr);
 
 				/*
@@ -421,10 +414,8 @@ sdiff(int fd)
 	LBUF_FREE(lbl);
 	LBUF_FREE(lbr);
 
-	if (outfp != NULL) {
+	if (outfp != NULL)
 		(void)fclose(outfp);
-		(void)unlink(tmpfn);
-	}
 }
 
 void
@@ -530,7 +521,7 @@ ask(struct lbuf *lb, const char *l, const char *r)
 			suppresscommon = 1;
 			break;
 		case 'v':
-			suppresscommon = 1;
+			suppresscommon = 0;
 			break;
 		default:
 			if (strcmp(cmd, "") != 0)
@@ -557,55 +548,21 @@ ask(struct lbuf *lb, const char *l, const char *r)
 void
 edit(struct lbuf *lb, const char *l, const char *r)
 {
-	static char *cmd = NULL;
-	int status;
+	char *editor, *tmpdir, *argv[3];
+	int pid, c, tmpfd, status;
 
-	if (cmd == NULL) {
-		const char *editor, *s;
-		size_t siz;
-		char *p;
+	if ((editor = getenv("EDITOR")) == NULL)
+		editor = _PATH_VI;
 
-		if ((editor = getenv("EDITOR")) == NULL)
-			editor = _PATH_VI;
-		/*
-		 * 1	argument spacing
-		 * 2	quoting the editor
-		 * 2	quoting the temporary filename
-		 * 1	NUL-termination
-		 * ===================================
-		 * 6	total
-		 */
-		siz = strlen(editor) + 6 + strlen(tmpfn);
-		for (s = editor; *s != '\0'; s++)
-			if (strpbrk(s, "\\'"))
-				siz++;
-		for (s = tmpfn; *s != '\0'; s++)
-			if (strpbrk(s, "\\'"))
-				siz++;
-		if ((cmd = malloc(siz)) == NULL)
-			err(2, NULL);
-		p = cmd;
-		*p++ = '\'';
-		for (s = editor; *s != '\0'; s++, p++) {
-			if (strchr("\\'", *s) != NULL)
-				*p++ = '\\';
-			*p = *s;
-		}
-		*p++ = '\'';
-		*p++ = ' ';
-		*p++ = '\'';
-		for (s = tmpfn; *s != '\0'; s++, p++) {
-			if (strchr("\\'", *s) != NULL)
-				*p++ = '\\';
-			*p = *s;
-		}
-		*p++ = '\'';
-		*p = '\0';
-	}
+	if ((tmpdir = getenv("TMPDIR")) == NULL)
+		tmpdir = _PATH_TMP;
+	(void)snprintf(tmpfn, sizeof(tmpfn),
+	    "%s/sdiff.XXXXXXXX", tmpdir);
+	if ((tmpfd = mkstemp(tmpfn)) == -1)
+		err(2, "%s", tmpfn);
+	if ((tmpfp = fdopen(tmpfd, "w+")) == NULL)
+		err(2, "fdopen");
 
-	if (ftruncate(fileno(tmpfp), 0) == -1)
-		err(2, "ftruncate");
-	fpurge(tmpfp);
 	if (l != NULL)
 		if (fwrite(l, 1, strlen(l), tmpfp) != strlen(l))
 			err(2, "fwrite");
@@ -615,11 +572,58 @@ edit(struct lbuf *lb, const char *l, const char *r)
 	if (r != NULL)
 		if (fwrite(r, 1, strlen(r), tmpfp) != strlen(r))
 			err(2, "fwrite");
-	status = system(cmd);
-	if (!WIFEXITED(status))
-		err(2, "%s", cmd);
-//	if ()
-//	LBUF_CAT();
+	if (fflush(tmpfp) != 0)
+		errx(2, "fflush");
+
+	argv[0] = editor;
+	argv[1] = tmpfn;
+	argv[2] = NULL;
+
+	(void)signal(SIGHUP, SIG_IGN);
+	(void)signal(SIGINT, SIG_IGN);
+	(void)signal(SIGQUIT, SIG_IGN);
+	pid = fork();
+	switch (pid) {
+	case -1:
+		(void)unlink(tmpfn);
+		err(2, "fork");
+		/* NOTREACHED */
+	case 0:
+		if (execvp(editor, argv) == -1)
+			err(2, "execvp");
+		/* NOTREACHED */
+	}
+
+	for (;;) {
+		if (waitpid(pid, &status, WUNTRACED) == -1) {
+			if (errno == EINTR)
+				continue;
+			if (errno == ECHILD)
+				err(2, "waitpid");
+			break;
+		}
+		if (WIFSTOPPED(status))
+			raise(WSTOPSIG(status));
+		else if (WIFEXITED(status))
+			break;
+	}
+	(void)signal(SIGHUP, SIG_DFL);
+	(void)signal(SIGINT, SIG_DFL);
+	(void)signal(SIGQUIT, SIG_DFL);
+
+	(void)unlink(tmpfn);
+
+	if (WEXITSTATUS(status) != 0)
+		errx(2, "%s: non-zero exit code (%d)", editor, status);
+	rewind(tmpfp);
+	fpurge(tmpfp);
+
+	while ((c = fgetc(tmpfp)) != EOF)
+		LBUF_APPEND(*lb, c);
+	LBUF_APPEND(*lb, '\0');
+	if (ferror(tmpfp))
+		err(2, "fgetc");
+	fclose(tmpfp);
 }
 
 #define ST_BEG  1	/* beginning */
